@@ -8,5 +8,4 @@ langchain_google_genai
 Pillow
 pytesseract
 langchain==0.3.14
-faiss-cpu==1.7.2
 openai
