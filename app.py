@@ -177,8 +177,8 @@ def download_pdf(summary):
 
 
 def main():
-    st.set_page_config(page_title="Document and Image Assistant", page_icon="📄", layout="wide")
-    st.header("📄 Chat with Documents and Images using Gemini AI 💬")
+    st.set_page_config(page_title="Document and Image Summary Assistant", page_icon="📄", layout="wide")
+    st.header("📄 Chat with Documents and Images using Google API Key and Using Gemini 💬")
 
     # Sidebar for file uploads
     with st.sidebar:
