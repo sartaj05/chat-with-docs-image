@@ -168,7 +168,6 @@ def download_pdf(summary):
     )
 
 
-# ---------------- Main Streamlit App ---------------- #
 def main():
     st.set_page_config(page_title="Document and Image Assistant", page_icon="📄", layout="wide")
     st.header("📄 Chat with Documents and Images using Gemini AI 💬")
@@ -186,20 +185,30 @@ def main():
     placeholder = st.empty()
 
     # Processing files
-    if process_button and uploaded_files:
-        with st.spinner("Processing your documents..."):
-            pdf_files = [f for f in uploaded_files if f.type == "application/pdf"]
-            image_files = [f for f in uploaded_files if f.type.startswith("image/")]
+    if uploaded_files:
+        # Display file names in a multi-select dropdown
+        file_names = [file.name for file in uploaded_files]
+        selected_files = st.multiselect(
+            "Select files to process", options=file_names, default=file_names
+        )
 
-            pdf_text = extract_text_from_pdfs(pdf_files)
-            image_text = extract_text_from_images(image_files)
+        if process_button:
+            # Filter selected files
+            selected_uploaded_files = [file for file in uploaded_files if file.name in selected_files]
 
-            combined_text = pdf_text + "\n" + image_text
-            if combined_text.strip():
-                text_chunks = split_text_into_chunks(combined_text)
-                create_faiss_vector_store(text_chunks)
-            else:
-                st.error("No extractable text found in the uploaded files.")
+            with st.spinner("Processing your documents..."):
+                pdf_files = [f for f in selected_uploaded_files if f.type == "application/pdf"]
+                image_files = [f for f in selected_uploaded_files if f.type.startswith("image/")]
+
+                pdf_text = extract_text_from_pdfs(pdf_files)
+                image_text = extract_text_from_images(image_files)
+
+                combined_text = pdf_text + "\n" + image_text
+                if combined_text.strip():
+                    text_chunks = split_text_into_chunks(combined_text)
+                    create_faiss_vector_store(text_chunks)
+                else:
+                    st.error("No extractable text found in the selected files.")
 
     # Summarization
     with st.expander("📜 Summarize Content", expanded=True):
