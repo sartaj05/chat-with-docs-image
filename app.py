@@ -14,7 +14,7 @@ from PIL import Image
 from fpdf import FPDF
 
 # Configure Tesseract OCR
-pytesseract.pytesseract.tesseract_cmd = r"C:\Users\91830\Desktop\sa\Tesseract-OCR\tesseract.exe"
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 # Load environment variables
 load_dotenv()
