@@ -178,6 +178,49 @@ def download_pdf(summary):
 
 def main():
     st.set_page_config(page_title="Document and Image Summary Assistant", page_icon="📄", layout="wide")
+    # Inject custom CSS for white and gray theme
+    st.markdown("""
+        <style>
+            /* Main page background and text color */
+            .main {
+                
+                color: #333333;
+            }
+            /* Sidebar styling */
+            .css-1d391kg {
+                background-color: #ffffff;  
+                border-right: 1px solid #e0e0e0;
+            }
+            /* Header styling */
+            .css-10trblm {
+                color: white;
+                font-weight: bold;
+            }
+            /* Buttons styling */
+            .stButton button {
+                background-color: #0078d7;
+                color: #ffffff;
+                border-radius: 6px;
+                font-size: 16px;
+            }
+          
+            /* Input fields and dropdowns */
+            .stTextInput, .stSelectbox {
+                border: 1px solid black;
+                border-radius: 6px;
+            }
+            /* Expanders styling */
+            .streamlit-expanderHeader {
+                background-color: #f0f0f0;
+                color: #333333;
+                font-weight: bold;
+            }
+            /* Spinner */
+            .stSpinner {
+                color: #0078d7;
+            }
+        </style>
+    """, unsafe_allow_html=True)
     st.header("📄 Chat with Documents and Images using Google API Key and Using Gemini 💬")
 
     # Sidebar for file uploads
