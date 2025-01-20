@@ -222,7 +222,7 @@ def main():
     with st.expander("📜 Summarize Content", expanded=True):
         user_topic = st.text_input("Enter the topic for summary (optional):")
         user_instruction = st.text_input("Enter summary instruction (e.g., 'short summary')")
-        summary_length = st.selectbox("Select the length of summary:", ["short", "medium", "long"])
+        summary_length = st.selectbox("Select the length of summary:", ["long", "medium", "short"])
         if user_instruction and st.button("✍️ Summarize"):
             with st.spinner("Generating summary..."):
                 summary = summarize_documents(user_instruction, topic=user_topic, summary_length=summary_length)
