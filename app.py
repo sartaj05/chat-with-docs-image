@@ -170,7 +170,7 @@ def download_pdf(summary):
 
 # ---------------- Main Streamlit App ---------------- #
 def main():
-    st.set_page_config(page_title="Document Assistant", page_icon="📄", layout="wide")
+    st.set_page_config(page_title="Document and Image Assistant", page_icon="📄", layout="wide")
     st.header("📄 Chat with Documents and Images using Gemini AI 💬")
 
     # Sidebar for file uploads
