@@ -4,7 +4,7 @@
     "features": [
         {
             "feature": "Document Upload",
-            "description": "Users can upload PDF and image files (e.g., scanned documents). Supports both drag-and-drop and file picker interfaces for easy document uploads."
+            "description": "Users can upload PDF and image files (e.g., scanned documents). Supports both drag-and-drop and file picker interfaces for easy document uploads. Users can also choose whether to summarize an image or a PDF."
         },
         {
             "feature": "Text Extraction",
@@ -16,7 +16,11 @@
         },
         {
             "feature": "Streamlit Interface",
-            "description": "The application uses Streamlit for a user-friendly, web-based interface that allows users to upload documents, select summary lengths, and view results in an interactive manner."
+            "description": "The application uses Streamlit for a user-friendly, web-based interface that allows users to upload documents, select summary lengths, and view results in an interactive manner. Users can also select whether they want the summarization to be based on PDF or image documents."
+        },
+        {
+            "feature": "Summary PDF Generation",
+            "description": "Once the summary is generated, the app automatically creates a PDF of the summary. Users can download this PDF summary directly from the Streamlit interface."
         }
     ],
     "installation": {
@@ -27,7 +31,7 @@
         ],
         "steps": [
             "Clone the repository: git clone https://github.com/sartaj05/chat-with-docs-image.git",
-            "Create a virtual environment: python3 -m venv venv",
+            "Create a virtual environment: python3 -m venv venv (optional)",
             "Activate the virtual environment (Windows): venv\\Scripts\\activate or (macOS/Linux): source venv/bin/activate",
             "Install required dependencies: pip install -r requirements.txt",
             "Install Tesseract OCR on your machine (instructions are provided in the README)",
@@ -35,19 +39,21 @@
         ]
     },
     "dependencies": [
-        "flask",
         "pdfminer.six",
         "pytesseract",
         "sumy",
         "nltk",
-        "streamlit"
+        "streamlit",
+        "reportlab"
     ],
     "usage": {
         "steps": [
             "Upload a PDF or image document using the Streamlit interface.",
             "The app processes the file and extracts the content (using pdfminer.six for PDFs or pytesseract for images).",
             "Choose the summary length (short, medium, or long) from the Streamlit options.",
-            "View the generated summary, which highlights the key points of the document."
+            "Select whether you want the summarization for a PDF or image file.",
+            "View the generated summary, which highlights the key points of the document.",
+            "Download the generated PDF summary directly from the Streamlit interface."
         ]
     },
     "license": "MIT License"
