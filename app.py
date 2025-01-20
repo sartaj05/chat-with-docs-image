@@ -100,8 +100,8 @@ def initialize_qa_chain():
         st.error(f"Error initializing QA chain: {e}")
         return None
 
-def summarize_documents(user_instruction="concise summary", topic=None):
-    """Generates a summary for indexed documents filtered by topic."""
+def summarize_documents(user_instruction="concise summary", topic=None, summary_length="short"):
+    """Generates a summary for indexed documents filtered by topic and selected summary length."""
     vector_store = load_faiss_vector_store()
     if not vector_store:
         return ""
@@ -109,8 +109,16 @@ def summarize_documents(user_instruction="concise summary", topic=None):
     query = user_instruction + (" " + topic if topic else "")
     docs = vector_store.similarity_search(query, k=3)
     
+    # Adjust the summary length based on the user selection
+    length_mapping = {
+        "short": "Make the summary very concise, focusing only on the essential points.",
+        "medium": "Provide a more detailed summary, capturing the key points while being reasonably concise.",
+        "long": "Write a detailed summary, including important details and explanations."
+    }
+
     prompt_template = f"""
-    You are an AI that summarizes content. Based on the context provided, create a {user_instruction} summary.
+    You are an AI that summarizes content. Based on the context provided, create a {user_instruction} summary. 
+    {length_mapping.get(summary_length, 'Make it concise.')}
     Context:\n {{context}}\n
     Summarize the content:
     """
@@ -214,9 +222,10 @@ def main():
     with st.expander("📜 Summarize Content", expanded=True):
         user_topic = st.text_input("Enter the topic for summary (optional):")
         user_instruction = st.text_input("Enter summary instruction (e.g., 'short summary')")
+        summary_length = st.selectbox("Select the length of summary:", ["short", "medium", "long"])
         if user_instruction and st.button("✍️ Summarize"):
             with st.spinner("Generating summary..."):
-                summary = summarize_documents(user_instruction, topic=user_topic)
+                summary = summarize_documents(user_instruction, topic=user_topic, summary_length=summary_length)
                 if summary:
                     st.success("Summary:")
                     st.write(summary)
