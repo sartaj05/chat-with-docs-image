@@ -153,24 +153,24 @@ def answer_user_question(user_question, topic=None):
 import os
 
 def generate_pdf_summary(summary):
-    """Generates a downloadable PDF from the summary."""
+    """Generates a PDF from the summary and returns the PDF binary data."""
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", size=12)
     pdf.multi_cell(200, 10, txt=summary, align="L")
 
-    # Change the path to a valid directory on your local machine
-    pdf_file_path = os.path.join(os.getcwd(), "summary.pdf")  # Saves the PDF in the current working directory
-    pdf.output(pdf_file_path)
-    return pdf_file_path
+    # Save the PDF to binary
+    pdf_output = pdf.output(dest='S').encode('latin1')  # Returns the PDF as a byte string
+    return pdf_output
 
 
 def download_pdf(summary):
-    """Provides the generated PDF for download."""
-    pdf_file_path = generate_pdf_summary(summary)
+    """Displays a download button for the generated PDF summary."""
+    # Dynamically generate PDF when the button is clicked
+    pdf_data = generate_pdf_summary(summary)
     st.download_button(
         label="Download PDF Summary",
-        data=open(pdf_file_path, "rb").read(),
+        data=pdf_data,
         file_name="summary.pdf",
         mime="application/pdf"
     )
@@ -221,26 +221,43 @@ def main():
     # Summarization
     with st.expander("📜 Summarize Content", expanded=True):
         user_topic = st.text_input("Enter the topic for summary (optional):")
-        user_instruction = st.text_input("Enter summary instruction (e.g., 'short summary')")
+        user_instruction = st.text_input("Enter summary instruction (e.g., 'short summary')", key="summary_instruction")
         summary_length = st.selectbox("Select the length of summary:", ["long", "medium", "short"])
-        if user_instruction and st.button("✍️ Summarize"):
-            with st.spinner("Generating summary..."):
-                summary = summarize_documents(user_instruction, topic=user_topic, summary_length=summary_length)
-                if summary:
-                    st.success("Summary:")
-                    st.write(summary)
-                    download_pdf(summary)  # Provide download option if summary is generated
+        
+        # Button always visible
+        summarize_button = st.button("✍️ Summarize")
+        
+        # Process the summarization if the button is clicked
+        if summarize_button:
+            if user_instruction.strip():  # Check if the instruction is provided
+                with st.spinner("Generating summary..."):
+                    summary = summarize_documents(user_instruction, topic=user_topic, summary_length=summary_length)
+                    if summary:
+                        st.success("Summary:")
+                        st.write(summary)
+                        download_pdf(summary)  # Provide download option if summary is generated
+            else:
+                st.warning("Please provide summary instructions before summarizing!")
 
     # Question Answering
     with st.expander("💬 Ask Questions", expanded=True):
         user_topic_for_question = st.text_input("Enter the topic for your question (optional):")
         user_question = st.text_input("Type your question about the document:")
-        if user_question and st.button("🔍 Get Answer"):
-            with st.spinner("Fetching answer..."):
-                answer = answer_user_question(user_question, topic=user_topic_for_question)
-                if answer:
-                    st.success("Answer:")
-                    st.write(answer)
+        
+        # Button always visible
+        question_button = st.button("🔍 Get Answer")
+        
+        # Process the question-answering if the button is clicked
+        if question_button:
+            if user_question.strip():  # Check if a question is provided
+                with st.spinner("Fetching answer..."):
+                    answer = answer_user_question(user_question, topic=user_topic_for_question)
+                    if answer:
+                        st.success("Answer:")
+                        st.write(answer)
+            else:
+                st.warning("Please enter a question before getting an answer!")
+
 
 if __name__ == "__main__":
     main()
