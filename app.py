@@ -177,10 +177,24 @@ def download_pdf(summary):
         mime="application/pdf"
     )
 
+# Add this import for detecting screen size
+from streamlit.components.v1 import html
 
 def main():
     st.set_page_config(page_title="Document and Image Summary Assistant", page_icon="📄", layout="wide")
     
+    # Add a custom style to detect mobile devices (use for responsive design)
+    st.markdown("""
+        <style>
+            @media (max-width: 800px) {
+                .stSidebar { display: none; }
+            }
+        </style>
+        """, unsafe_allow_html=True)
+
+    # Add logic to hide sidebar after file processing
+    hide_sidebar = False
+
     # Add a loading spinner to give feedback during processing
     with st.spinner("Loading the application... Please wait."):
         # Inject custom CSS for white and gray theme
@@ -188,7 +202,6 @@ def main():
             <style>
                 /* Main page background and text color */
                 .main {
-                    
                     color: #333333;
                 }
                 /* Sidebar styling */
@@ -208,8 +221,7 @@ def main():
                     border-radius: 6px;
                     font-size: 16px;
                 }
-              
-                /* Input fields and dropdowns */
+               /* Input fields and dropdowns */
                 .stTextInput, .stSelectbox {
                     border: 1px solid black;
                     border-radius: 6px;
@@ -266,8 +278,13 @@ def main():
                     create_faiss_vector_store(text_chunks)
                     # Success message after processing
                     st.success("Your files have been successfully processed! You can now summarize this pdf or image.")
+                    hide_sidebar = True  # Set flag to hide the sidebar after processing
                 else:
                     st.error("No extractable text found in the selected files.")
+
+    # Conditionally hide the sidebar on mobile
+    if hide_sidebar:
+        html('<style>.stSidebar { display: none; }</style>', height=0)
 
     # Summarization
     with st.expander("📜 Summarize Content", expanded=True):
