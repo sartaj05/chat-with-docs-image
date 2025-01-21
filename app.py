@@ -14,7 +14,6 @@ import pytesseract
 from PIL import Image
 from fpdf import FPDF
 
-
 # Configure Tesseract OCR
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
@@ -29,7 +28,7 @@ else:
     st.error("GOOGLE_API_KEY is missing in environment variables. Please set it to proceed.")
     st.stop()
 
-# ---------------- Helper Functions ---------------- #
+# Helper Functions what i am using this pdf
 def extract_text_from_pdfs(pdf_docs):
     """Extracts text from uploaded PDF files."""
     text = ""
@@ -121,6 +120,7 @@ def summarize_documents(user_instruction="concise summary", topic=None, summary_
     prompt_template = f"""
     You are an AI that summarizes content. Based on the context provided, create a {user_instruction} summary. 
     {length_mapping.get(summary_length, 'Make it concise.')}
+
     Context:\n {{context}}\n
     Summarize the content:
     """
@@ -180,49 +180,53 @@ def download_pdf(summary):
 
 def main():
     st.set_page_config(page_title="Document and Image Summary Assistant", page_icon="📄", layout="wide")
-    # Inject custom CSS for white and gray theme
-    st.markdown("""
-        <style>
-            /* Main page background and text color */
-            .main {
-                
-                color: #333333;
-            }
-            /* Sidebar styling */
-            .css-1d391kg {
-                background-color: #ffffff;  
-                border-right: 1px solid #e0e0e0;
-            }
-            /* Header styling */
-            .css-10trblm {
-                color: white;
-                font-weight: bold;
-            }
-            /* Buttons styling */
-            .stButton button {
-                background-color: #0078d7;
-                color: #ffffff;
-                border-radius: 6px;
-                font-size: 16px;
-            }
-          
-            /* Input fields and dropdowns */
-            .stTextInput, .stSelectbox {
-                border: 1px solid black;
-                border-radius: 6px;
-            }
-            /* Expanders styling */
-            .streamlit-expanderHeader {
-                background-color: #f0f0f0;
-                color: #333333;
-                font-weight: bold;
-            }
-            /* Spinner */
-            .stSpinner {
-                color: #0078d7;
-            }
-        </style>
-    """, unsafe_allow_html=True)
+    
+    # Add a loading spinner to give feedback during processing
+    with st.spinner("Loading the application... Please wait."):
+        # Inject custom CSS for white and gray theme
+        st.markdown("""
+            <style>
+                /* Main page background and text color */
+                .main {
+                    
+                    color: #333333;
+                }
+                /* Sidebar styling */
+                .css-1d391kg {
+                    background-color: #ffffff;  
+                    border-right: 1px solid #e0e0e0;
+                }
+                /* Header styling */
+                .css-10trblm {
+                    color: white;
+                    font-weight: bold;
+                }
+                /* Buttons styling */
+                .stButton button {
+                    background-color: #0078d7;
+                    color: #ffffff;
+                    border-radius: 6px;
+                    font-size: 16px;
+                }
+              
+                /* Input fields and dropdowns */
+                .stTextInput, .stSelectbox {
+                    border: 1px solid black;
+                    border-radius: 6px;
+                }
+                /* Expanders styling */
+                .streamlit-expanderHeader {
+                    background-color: #f0f0f0;
+                    color: #333333;
+                    font-weight: bold;
+                }
+                /* Spinner */
+                .stSpinner {
+                    color: #0078d7;
+                }
+            </style>
+        """, unsafe_allow_html=True)
+    
     st.header("📄 Chat with Documents and Images using Google API Key and Using Gemini 💬")
 
     # Sidebar for file uploads
@@ -260,6 +264,8 @@ def main():
                 if combined_text.strip():
                     text_chunks = split_text_into_chunks(combined_text)
                     create_faiss_vector_store(text_chunks)
+                    # Success message after processing
+                    st.success("Your files have been successfully processed! You can now summarize this pdf or image.")
                 else:
                     st.error("No extractable text found in the selected files.")
 
