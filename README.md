@@ -27,7 +27,7 @@ Document Summary Assistant is an application that takes any document (PDF/Image)
 - Once the summary is generated, the app automatically creates a PDF of the summary.
 - Users can download this PDF summary directly from the Streamlit interface.
 
-### 6. Question-Answer Functionality (New Feature)
+### 6. Question-Answer Functionality (New Feature) Currentaly Working About This
 - Users can ask questions related to the content of the uploaded PDF document.
 - The app processes the query and retrieves the most relevant answer based on the extracted text.
 - Leverages natural language processing (NLP) techniques to provide accurate and context-aware responses.
