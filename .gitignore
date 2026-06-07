@@ -1,0 +1,45 @@
+# Virtual environment
+venv/
+.env/
+.venv/
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Streamlit
+.streamlit/secrets.toml
+
+# FAISS / generated vector index
+faiss_index/
+index.faiss
+index.pkl
+
+# Uploaded/generated files
+uploads/
+downloads/
+summary.pdf
+*.pdf.tmp
+
+# Logs
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Build/package
+build/
+dist/
+*.egg-info/
+
+# Docker local overrides
+docker-compose.override.yml
