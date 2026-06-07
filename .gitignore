@@ -43,3 +43,5 @@ dist/
 
 # Docker local overrides
 docker-compose.override.yml
+
+collections/

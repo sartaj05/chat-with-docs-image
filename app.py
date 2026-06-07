@@ -1,4 +1,6 @@
 import os
+import re
+import shutil
 import platform
 from typing import List, Dict, Tuple
 
@@ -37,7 +39,8 @@ if platform.system() == "Windows":
         pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
 
-FAISS_INDEX_PATH = "faiss_index"
+COLLECTIONS_DIR = "collections"
+DEFAULT_COLLECTION = "default"
 
 
 def apply_custom_css():
@@ -92,6 +95,16 @@ def apply_custom_css():
             border: 1px solid #cbdcf0;
             box-shadow: 0 10px 28px rgba(30, 64, 175, 0.07);
             margin-bottom: 1.6rem;
+        }
+
+        .collection-card {
+            padding: 0.95rem;
+            border-radius: 16px;
+            background: linear-gradient(135deg, #eef6ff 0%, #edf4fb 100%);
+            border: 1px solid #bfd4ef;
+            margin-bottom: 1rem;
+            font-weight: 750;
+            color: #0f3f5f !important;
         }
 
         .metric-card {
@@ -311,67 +324,181 @@ def apply_custom_css():
         """,
         unsafe_allow_html=True
     )
-
-
+    
 def initialize_session_state():
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
+
+    if "chat_histories" not in st.session_state:
+        st.session_state.chat_histories = {}
+
+    if "active_collection" not in st.session_state:
+        st.session_state.active_collection = DEFAULT_COLLECTION
 
 
-def build_source_label(metadata: Dict) -> str:
-    file_name = metadata.get("file_name", "Unknown file")
-    file_type = metadata.get("file_type", "Unknown")
-    page = metadata.get("page")
-    chunk = metadata.get("chunk")
+def sanitize_collection_name(name: str) -> str:
 
-    if page:
-        return f"{file_name} | {file_type} | Page {page}"
+    name = name.strip().lower()
 
-    return f"{file_name} | {file_type} | Chunk {chunk}"
+    name = re.sub(
+        r"[^a-zA-Z0-9_-]",
+        "_",
+        name
+    )
 
-
-def show_sources(docs: List[LCDocument], title: str = "Sources"):
-    if not docs:
-        return
-
-    st.markdown(f"### 🔎 {title}")
-
-    seen = set()
-    unique_docs = []
-
-    for doc in docs:
-        label = build_source_label(doc.metadata)
-
-        if label not in seen:
-            seen.add(label)
-            unique_docs.append(doc)
-
-    for i, doc in enumerate(unique_docs, start=1):
-        label = build_source_label(doc.metadata)
-        preview = doc.page_content[:900].strip()
-
-        st.markdown(
-            f"""
-            <div class="source-card">
-                <b>{i}. {label}</b>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-        with st.expander(f"View source preview {i}", expanded=False):
-            st.write(preview)
+    return name
 
 
-def get_embeddings():
-    return GoogleGenerativeAIEmbeddings(
-        model="models/gemini-embedding-001",
-        google_api_key=api_key
+def ensure_collections_dir():
+
+    os.makedirs(
+        COLLECTIONS_DIR,
+        exist_ok=True
     )
 
 
-def save_chat_message(question: str, answer: str, source_docs: List[LCDocument]):
-    st.session_state.chat_history.append(
+def get_collection_path(
+    collection_name: str
+) -> str:
+
+    ensure_collections_dir()
+
+    return os.path.join(
+        COLLECTIONS_DIR,
+        collection_name
+    )
+
+
+def collection_exists(
+    collection_name: str
+) -> bool:
+
+    path = get_collection_path(
+        collection_name
+    )
+
+    return (
+        os.path.exists(path)
+        and
+        os.path.exists(
+            os.path.join(
+                path,
+                "index.faiss"
+            )
+        )
+    )
+
+
+def list_collections():
+
+    ensure_collections_dir()
+
+    collections = []
+
+    for item in os.listdir(
+        COLLECTIONS_DIR
+    ):
+
+        full_path = os.path.join(
+            COLLECTIONS_DIR,
+            item
+        )
+
+        if os.path.isdir(
+            full_path
+        ):
+            collections.append(
+                item
+            )
+
+    collections.sort()
+
+    if DEFAULT_COLLECTION not in collections:
+        collections.insert(
+            0,
+            DEFAULT_COLLECTION
+        )
+
+    return collections
+
+
+def create_collection(
+    collection_name: str
+):
+
+    collection_name = sanitize_collection_name(
+        collection_name
+    )
+
+    if not collection_name:
+        return None
+
+    path = get_collection_path(
+        collection_name
+    )
+
+    os.makedirs(
+        path,
+        exist_ok=True
+    )
+
+    return collection_name
+
+
+def delete_collection(
+    collection_name: str
+):
+
+    if collection_name == DEFAULT_COLLECTION:
+        return False
+
+    path = get_collection_path(
+        collection_name
+    )
+
+    if os.path.exists(path):
+        shutil.rmtree(path)
+
+    if (
+        collection_name
+        in
+        st.session_state.chat_histories
+    ):
+        del st.session_state.chat_histories[
+            collection_name
+        ]
+
+    return True
+
+
+def get_chat_history(
+    collection_name: str
+):
+
+    if (
+        collection_name
+        not in
+        st.session_state.chat_histories
+    ):
+        st.session_state.chat_histories[
+            collection_name
+        ] = []
+
+    return st.session_state.chat_histories[
+        collection_name
+    ]
+
+
+def save_chat_message(
+    collection_name: str,
+    question: str,
+    answer: str,
+    source_docs
+):
+
+    history = get_chat_history(
+        collection_name
+    )
+
+    history.append(
         {
             "question": question,
             "answer": answer,
@@ -380,27 +507,169 @@ def save_chat_message(question: str, answer: str, source_docs: List[LCDocument])
     )
 
 
-def build_chat_history_text() -> str:
+def clear_chat_history(
+    collection_name: str
+):
+
+    st.session_state.chat_histories[
+        collection_name
+    ] = []
+
+
+def build_chat_history_text(
+    collection_name: str
+):
+
+    history = get_chat_history(
+        collection_name
+    )
+
     lines = []
 
-    for index, item in enumerate(st.session_state.chat_history, start=1):
-        lines.append(f"Q{index}: {item['question']}")
-        lines.append(f"A{index}: {item['answer']}")
+    for index, item in enumerate(
+        history,
+        start=1
+    ):
+
+        lines.append(
+            f"Q{index}: {item['question']}"
+        )
+
+        lines.append(
+            f"A{index}: {item['answer']}"
+        )
+
         lines.append("Sources:")
 
         seen = set()
 
         for doc in item["sources"]:
-            label = build_source_label(doc.metadata)
+
+            label = build_source_label(
+                doc.metadata
+            )
 
             if label not in seen:
                 seen.add(label)
-                lines.append(f"- {label}")
+                lines.append(
+                    f"- {label}"
+                )
 
         lines.append("")
 
     return "\n".join(lines)
 
+
+def get_collection_index_path(
+    collection_name: str
+):
+
+    return get_collection_path(
+        collection_name
+    )
+
+
+def collection_has_index(
+    collection_name: str
+):
+
+    path = get_collection_index_path(
+        collection_name
+    )
+
+    return (
+        os.path.exists(
+            os.path.join(
+                path,
+                "index.faiss"
+            )
+        )
+        and
+        os.path.exists(
+            os.path.join(
+                path,
+                "index.pkl"
+            )
+        )
+    )
+
+
+def reset_collection_index(
+    collection_name: str
+):
+
+    path = get_collection_index_path(
+        collection_name
+    )
+
+    faiss_file = os.path.join(
+        path,
+        "index.faiss"
+    )
+
+    pkl_file = os.path.join(
+        path,
+        "index.pkl"
+    )
+
+    if os.path.exists(
+        faiss_file
+    ):
+        os.remove(
+            faiss_file
+        )
+
+    if os.path.exists(
+        pkl_file
+    ):
+        os.remove(
+            pkl_file
+        )
+
+
+def build_source_label(
+    metadata: Dict
+) -> str:
+
+    file_name = metadata.get(
+        "file_name",
+        "Unknown file"
+    )
+
+    file_type = metadata.get(
+        "file_type",
+        "Unknown"
+    )
+
+    page = metadata.get(
+        "page"
+    )
+
+    chunk = metadata.get(
+        "chunk"
+    )
+
+    if page:
+        return (
+            f"{file_name} | "
+            f"{file_type} | "
+            f"Page {page}"
+        )
+
+    return (
+        f"{file_name} | "
+        f"{file_type} | "
+        f"Chunk {chunk}"
+    )
+
+
+def get_embeddings():
+
+    return GoogleGenerativeAIEmbeddings(
+        model="models/gemini-embedding-001",
+        google_api_key=api_key
+    )
+    
 def split_text_with_metadata(
     text: str,
     base_metadata: Dict
@@ -411,11 +680,16 @@ def split_text_with_metadata(
         chunk_overlap=500
     )
 
-    chunks = splitter.split_text(text)
+    chunks = splitter.split_text(
+        text
+    )
 
     documents = []
 
-    for index, chunk in enumerate(chunks, start=1):
+    for index, chunk in enumerate(
+        chunks,
+        start=1
+    ):
         metadata = base_metadata.copy()
         metadata["chunk"] = index
 
@@ -429,21 +703,32 @@ def split_text_with_metadata(
     return documents
 
 
-def extract_documents_from_pdfs(pdf_docs) -> List[LCDocument]:
+def extract_documents_from_pdfs(
+    pdf_docs
+) -> List[LCDocument]:
 
     documents = []
 
     for pdf in pdf_docs:
+
         try:
             pdf.seek(0)
 
-            reader = PdfReader(pdf)
+            reader = PdfReader(
+                pdf
+            )
 
             has_normal_text = False
 
-            for page_index, page in enumerate(reader.pages, start=1):
+            for page_index, page in enumerate(
+                reader.pages,
+                start=1
+            ):
 
-                page_text = page.extract_text() or ""
+                page_text = (
+                    page.extract_text()
+                    or ""
+                )
 
                 if page_text.strip():
 
@@ -458,17 +743,26 @@ def extract_documents_from_pdfs(pdf_docs) -> List[LCDocument]:
                         }
                     )
 
-                    documents.extend(page_docs)
+                    documents.extend(
+                        page_docs
+                    )
 
             if not has_normal_text:
 
                 pdf.seek(0)
 
-                images = convert_from_bytes(pdf.read())
+                images = convert_from_bytes(
+                    pdf.read()
+                )
 
-                for page_index, image in enumerate(images, start=1):
+                for page_index, image in enumerate(
+                    images,
+                    start=1
+                ):
 
-                    scanned_text = pytesseract.image_to_string(image)
+                    scanned_text = pytesseract.image_to_string(
+                        image
+                    )
 
                     if scanned_text.strip():
 
@@ -481,7 +775,9 @@ def extract_documents_from_pdfs(pdf_docs) -> List[LCDocument]:
                             }
                         )
 
-                        documents.extend(page_docs)
+                        documents.extend(
+                            page_docs
+                        )
 
         except Exception as e:
             st.error(
@@ -491,16 +787,22 @@ def extract_documents_from_pdfs(pdf_docs) -> List[LCDocument]:
     return documents
 
 
-def extract_documents_from_images(image_docs) -> List[LCDocument]:
+def extract_documents_from_images(
+    image_docs
+) -> List[LCDocument]:
 
     documents = []
 
     for image_file in image_docs:
 
         try:
-            image = Image.open(image_file)
+            image = Image.open(
+                image_file
+            )
 
-            image_text = pytesseract.image_to_string(image)
+            image_text = pytesseract.image_to_string(
+                image
+            )
 
             if image_text.strip():
 
@@ -512,7 +814,9 @@ def extract_documents_from_images(image_docs) -> List[LCDocument]:
                     }
                 )
 
-                documents.extend(image_docs_generated)
+                documents.extend(
+                    image_docs_generated
+                )
 
         except Exception as e:
             st.error(
@@ -522,20 +826,27 @@ def extract_documents_from_images(image_docs) -> List[LCDocument]:
     return documents
 
 
-def extract_documents_from_docx(docx_docs) -> List[LCDocument]:
+def extract_documents_from_docx(
+    docx_docs
+) -> List[LCDocument]:
 
     documents = []
 
     for docx_file in docx_docs:
 
         try:
-            document = Document(docx_file)
+            document = Document(
+                docx_file
+            )
 
             docx_text = ""
 
             for para in document.paragraphs:
                 if para.text.strip():
-                    docx_text += para.text + "\n"
+                    docx_text += (
+                        para.text
+                        + "\n"
+                    )
 
             for table in document.tables:
 
@@ -544,9 +855,16 @@ def extract_documents_from_docx(docx_docs) -> List[LCDocument]:
                     row_values = []
 
                     for cell in row.cells:
-                        row_values.append(cell.text.strip())
+                        row_values.append(
+                            cell.text.strip()
+                        )
 
-                    docx_text += " | ".join(row_values) + "\n"
+                    docx_text += (
+                        " | ".join(
+                            row_values
+                        )
+                        + "\n"
+                    )
 
             if docx_text.strip():
 
@@ -558,7 +876,9 @@ def extract_documents_from_docx(docx_docs) -> List[LCDocument]:
                     }
                 )
 
-                documents.extend(docx_docs_generated)
+                documents.extend(
+                    docx_docs_generated
+                )
 
         except Exception as e:
             st.error(
@@ -569,6 +889,7 @@ def extract_documents_from_docx(docx_docs) -> List[LCDocument]:
 
 
 def create_faiss_vector_store(
+    collection_name: str,
     documents: List[LCDocument]
 ):
 
@@ -581,8 +902,17 @@ def create_faiss_vector_store(
             embedding=embeddings
         )
 
+        collection_path = get_collection_index_path(
+            collection_name
+        )
+
+        os.makedirs(
+            collection_path,
+            exist_ok=True
+        )
+
         vector_store.save_local(
-            FAISS_INDEX_PATH
+            collection_path
         )
 
         return vector_store
@@ -595,20 +925,25 @@ def create_faiss_vector_store(
         return None
 
 
-def load_faiss_vector_store():
+def load_faiss_vector_store(
+    collection_name: str
+):
 
     try:
 
         embeddings = get_embeddings()
 
+        collection_path = get_collection_index_path(
+            collection_name
+        )
+
         return FAISS.load_local(
-            FAISS_INDEX_PATH,
+            collection_path,
             embeddings,
             allow_dangerous_deserialization=True
         )
 
     except Exception as e:
-
         st.error(
             f"Error loading FAISS vector store: {e}"
         )
@@ -617,11 +952,14 @@ def load_faiss_vector_store():
 
 
 def search_documents(
+    collection_name: str,
     query: str,
     k: int = 6
 ) -> List[LCDocument]:
 
-    vector_store = load_faiss_vector_store()
+    vector_store = load_faiss_vector_store(
+        collection_name
+    )
 
     if not vector_store:
         return []
@@ -632,52 +970,65 @@ def search_documents(
     )
 
 
-def reset_index():
-
-    if os.path.exists(FAISS_INDEX_PATH):
-
-        for file_name in os.listdir(
-            FAISS_INDEX_PATH
-        ):
-            os.remove(
-                os.path.join(
-                    FAISS_INDEX_PATH,
-                    file_name
-                )
-            )
-
-        os.rmdir(
-            FAISS_INDEX_PATH
-        )
-
-
-def get_file_type_counts(
-    uploaded_files
+def show_sources(
+    docs: List[LCDocument],
+    title: str = "Sources"
 ):
 
-    counts = {
-        "PDF": 0,
-        "Image": 0,
-        "DOCX": 0
-    }
+    if not docs:
+        return
 
-    for file in uploaded_files:
+    st.markdown(
+        f"### 🔎 {title}"
+    )
 
-        name = file.name.lower()
+    seen = set()
+    unique_docs = []
 
-        if name.endswith(".pdf"):
-            counts["PDF"] += 1
+    for doc in docs:
 
-        elif name.endswith(
-            (".jpg", ".jpeg", ".png")
+        label = build_source_label(
+            doc.metadata
+        )
+
+        if label not in seen:
+            seen.add(
+                label
+            )
+            unique_docs.append(
+                doc
+            )
+
+    for i, doc in enumerate(
+        unique_docs,
+        start=1
+    ):
+
+        label = build_source_label(
+            doc.metadata
+        )
+
+        preview = doc.page_content[
+            :900
+        ].strip()
+
+        st.markdown(
+            f"""
+            <div class="source-card">
+                <b>{i}. {label}</b>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        with st.expander(
+            f"View source preview {i}",
+            expanded=False
         ):
-            counts["Image"] += 1
-
-        elif name.endswith(".docx"):
-            counts["DOCX"] += 1
-
-    return counts
-
+            st.write(
+                preview
+            )
+            
 def initialize_qa_chain():
 
     prompt_template = """
@@ -770,6 +1121,7 @@ Write the summary:
 
 
 def summarize_documents(
+    collection_name: str,
     user_instruction,
     topic=None,
     summary_length="short"
@@ -781,6 +1133,7 @@ def summarize_documents(
         query += " " + topic
 
     docs = search_documents(
+        collection_name,
         query,
         k=6
     )
@@ -825,6 +1178,7 @@ def summarize_documents(
 
 
 def answer_user_question(
+    collection_name: str,
     user_question,
     topic=None
 ) -> Tuple[str, List[LCDocument]]:
@@ -835,6 +1189,7 @@ def answer_user_question(
         query += " " + topic
 
     docs = search_documents(
+        collection_name,
         query,
         k=6
     )
@@ -864,7 +1219,9 @@ def answer_user_question(
         return "", docs
 
 
-def generate_pdf_summary(summary):
+def generate_pdf_summary(
+    summary
+):
 
     pdf = FPDF()
     pdf.add_page()
@@ -894,7 +1251,9 @@ def generate_pdf_summary(summary):
     )
 
 
-def download_pdf(summary):
+def download_pdf(
+    summary
+):
 
     pdf_data = generate_pdf_summary(
         summary
@@ -908,31 +1267,45 @@ def download_pdf(summary):
     )
 
 
-def download_chat_history():
+def download_chat_history(
+    collection_name: str
+):
 
-    if not st.session_state.chat_history:
+    history = get_chat_history(
+        collection_name
+    )
+
+    if not history:
         return
 
-    chat_text = build_chat_history_text()
+    chat_text = build_chat_history_text(
+        collection_name
+    )
 
     st.download_button(
         label="⬇️ Download Chat History",
         data=chat_text,
-        file_name="chat_history.txt",
+        file_name=f"{collection_name}_chat_history.txt",
         mime="text/plain"
     )
 
 
-def render_chat_history():
+def render_chat_history(
+    collection_name: str
+):
 
-    if not st.session_state.chat_history:
+    history = get_chat_history(
+        collection_name
+    )
+
+    if not history:
         st.info(
-            "No chat yet. Ask a question after processing your documents."
+            "No chat yet. Ask a question after processing your selected collection."
         )
         return
 
     for index, item in enumerate(
-        st.session_state.chat_history,
+        history,
         start=1
     ):
 
@@ -960,6 +1333,24 @@ def render_chat_history():
             item["sources"],
             title=f"Sources for Answer {index}"
         )
+def get_file_type_counts(uploaded_files):
+    counts = {
+        "PDF": 0,
+        "Image": 0,
+        "DOCX": 0
+    }
+
+    for file in uploaded_files:
+        name = file.name.lower()
+
+        if name.endswith(".pdf"):
+            counts["PDF"] += 1
+        elif name.endswith((".jpg", ".jpeg", ".png")):
+            counts["Image"] += 1
+        elif name.endswith(".docx"):
+            counts["DOCX"] += 1
+
+    return counts
         
 def main():
 
@@ -971,14 +1362,15 @@ def main():
 
     initialize_session_state()
     apply_custom_css()
+    ensure_collections_dir()
 
     st.markdown(
         """
         <div class="hero-card">
             <div class="main-title">📄 Document Summary Assistant</div>
             <div class="sub-title">
-                Chat with PDF, scanned PDF, image, and DOCX files using Gemini AI.
-                Includes source citations, previews, and chat history.
+                Organize documents into collections, summarize them, ask questions,
+                and verify answers with source citations.
             </div>
         </div>
         """,
@@ -986,6 +1378,57 @@ def main():
     )
 
     with st.sidebar:
+
+        st.markdown("## 🗂️ Document Library")
+
+        new_collection_name = st.text_input(
+            "Create collection",
+            placeholder="Example: project_report"
+        )
+
+        if st.button(
+            "➕ Create Collection",
+            use_container_width=True
+        ):
+            created_name = create_collection(
+                new_collection_name
+            )
+
+            if created_name:
+                st.session_state.active_collection = created_name
+                st.success(
+                    f"Collection created: {created_name}"
+                )
+            else:
+                st.warning(
+                    "Please enter a valid collection name."
+                )
+
+        collections = list_collections()
+
+        selected_collection = st.selectbox(
+            "Active collection",
+            options=collections,
+            index=collections.index(
+                st.session_state.active_collection
+            )
+            if st.session_state.active_collection in collections
+            else 0
+        )
+
+        st.session_state.active_collection = selected_collection
+
+        active_collection = st.session_state.active_collection
+
+        st.markdown(
+            f"""
+            <div class="collection-card">
+                📁 Active Collection:<br>
+                <b>{active_collection}</b>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
         st.markdown("## 📂 Upload Center")
 
@@ -1069,37 +1512,66 @@ def main():
                 )
 
         process_button = st.button(
-            "🚀 Process Files",
+            "🚀 Process Files Into Collection",
             use_container_width=True
         )
 
         if st.button(
-            "🧹 Reset Saved Index",
+            "🧹 Reset Selected Collection Index",
             use_container_width=True
         ):
-            reset_index()
-            st.success(
-                "Saved FAISS index removed."
+            reset_collection_index(
+                active_collection
             )
+            clear_chat_history(
+                active_collection
+            )
+            st.success(
+                f"Index reset for: {active_collection}"
+            )
+
+        if active_collection != DEFAULT_COLLECTION:
+
+            if st.button(
+                "🗑️ Delete Selected Collection",
+                use_container_width=True
+            ):
+                deleted = delete_collection(
+                    active_collection
+                )
+
+                if deleted:
+                    st.session_state.active_collection = DEFAULT_COLLECTION
+                    st.success(
+                        "Collection deleted."
+                    )
+                else:
+                    st.warning(
+                        "Default collection cannot be deleted."
+                    )
 
         if st.button(
-            "🗑️ Clear Chat History",
+            "💬 Clear Collection Chat",
             use_container_width=True
         ):
-            st.session_state.chat_history = []
+            clear_chat_history(
+                active_collection
+            )
             st.success(
-                "Chat history cleared."
+                "Chat history cleared for this collection."
             )
 
-        download_chat_history()
+        download_chat_history(
+            active_collection
+        )
 
-        if os.path.exists(
-            FAISS_INDEX_PATH
+        if collection_has_index(
+            active_collection
         ):
             st.markdown(
                 """
                 <div class="status-box">
-                    ✅ Vector index is ready. You can summarize or ask questions.
+                    ✅ Collection index is ready. You can summarize or ask questions.
                 </div>
                 """,
                 unsafe_allow_html=True
@@ -1108,7 +1580,7 @@ def main():
             st.markdown(
                 """
                 <div class="status-box">
-                    ℹ️ No active vector index. Upload and process files first.
+                    ℹ️ No index for this collection. Upload and process files first.
                 </div>
                 """,
                 unsafe_allow_html=True
@@ -1124,7 +1596,7 @@ def main():
         st.markdown("### 🧾 File Selection")
 
         selected_files = st.multiselect(
-            "Choose which files to process",
+            "Choose which files to process into active collection",
             options=file_names,
             default=file_names
         )
@@ -1147,7 +1619,7 @@ def main():
             status_area = st.empty()
 
             with st.spinner(
-                "Extracting text and creating vector index..."
+                f"Processing files into collection: {active_collection}"
             ):
 
                 status_area.info(
@@ -1202,16 +1674,17 @@ def main():
                 if documents:
 
                     status_area.info(
-                        "Step 3/4: Preparing chunks and source metadata..."
+                        "Step 3/4: Preparing source metadata..."
                     )
                     progress_bar.progress(65)
 
                     status_area.info(
-                        "Step 4/4: Creating FAISS vector index..."
+                        "Step 4/4: Creating collection index..."
                     )
                     progress_bar.progress(85)
 
                     vector_store = create_faiss_vector_store(
+                        active_collection,
                         documents
                     )
 
@@ -1220,7 +1693,7 @@ def main():
                         progress_bar.progress(100)
 
                         status_area.success(
-                            f"Files processed successfully. Created {len(documents)} indexed chunks with sources."
+                            f"Collection '{active_collection}' updated with {len(documents)} indexed chunks."
                         )
 
                     else:
@@ -1237,6 +1710,15 @@ def main():
 
     st.divider()
 
+    st.markdown(
+        f"""
+        <div class="collection-card">
+            Working inside collection: <b>{st.session_state.active_collection}</b>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
     col1, col2 = st.columns(
         2,
         gap="large"
@@ -1245,7 +1727,7 @@ def main():
     with col1:
 
         with st.expander(
-            "📜 Summarize Content",
+            "📜 Summarize Collection",
             expanded=True
         ):
 
@@ -1273,11 +1755,11 @@ def main():
                 use_container_width=True
             ):
 
-                if not os.path.exists(
-                    FAISS_INDEX_PATH
+                if not collection_has_index(
+                    active_collection
                 ):
                     st.warning(
-                        "Please process files first."
+                        "Please process files into this collection first."
                     )
 
                 elif not user_instruction.strip():
@@ -1289,10 +1771,11 @@ def main():
                 else:
 
                     with st.spinner(
-                        "Generating summary with source tracking..."
+                        "Generating summary from active collection..."
                     ):
 
                         summary, source_docs = summarize_documents(
+                            collection_name=active_collection,
                             user_instruction=user_instruction,
                             topic=user_topic,
                             summary_length=summary_length
@@ -1320,7 +1803,7 @@ def main():
     with col2:
 
         with st.expander(
-            "💬 Ask Questions",
+            "💬 Ask Collection",
             expanded=True
         ):
 
@@ -1331,7 +1814,7 @@ def main():
 
             user_question = st.text_area(
                 "Your question",
-                placeholder="Ask anything from the uploaded document...",
+                placeholder="Ask anything from the active collection...",
                 height=120
             )
 
@@ -1340,12 +1823,12 @@ def main():
                 use_container_width=True
             ):
 
-                if not os.path.exists(
-                    FAISS_INDEX_PATH
+                if not collection_has_index(
+                    active_collection
                 ):
 
                     st.warning(
-                        "Please process files first."
+                        "Please process files into this collection first."
                     )
 
                 elif not user_question.strip():
@@ -1357,10 +1840,11 @@ def main():
                 else:
 
                     with st.spinner(
-                        "Finding answer with source tracking..."
+                        "Finding answer from active collection..."
                     ):
 
                         answer, source_docs = answer_user_question(
+                            collection_name=active_collection,
                             user_question=user_question,
                             topic=user_topic_for_question
                         )
@@ -1368,21 +1852,27 @@ def main():
                         if answer:
 
                             save_chat_message(
+                                active_collection,
                                 user_question,
                                 answer,
                                 source_docs
                             )
 
                             st.success(
-                                "Answer saved to chat history"
+                                "Answer saved to this collection chat history"
                             )
 
     st.divider()
 
-    st.markdown("## 💬 Chat History")
+    st.markdown(
+        f"## 💬 Chat History: `{active_collection}`"
+    )
 
-    render_chat_history()
+    render_chat_history(
+        active_collection
+    )
 
 
 if __name__ == "__main__":
     main()
+    
