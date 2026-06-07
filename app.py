@@ -145,6 +145,30 @@ def apply_custom_css():
             font-size: 0.92rem;
         }
 
+        .chat-user-card {
+            padding: 0.9rem 1rem;
+            border-radius: 16px;
+            background: linear-gradient(135deg, #dbeafe 0%, #e0f2fe 100%);
+            border: 1px solid #bfdbfe;
+            margin-bottom: 0.7rem;
+        }
+
+        .chat-ai-card {
+            padding: 0.95rem 1rem;
+            border-radius: 16px;
+            background: linear-gradient(135deg, #f8fafc 0%, #edf5fb 100%);
+            border: 1px solid #cbdcf0;
+            margin-bottom: 1rem;
+            box-shadow: 0 8px 18px rgba(15, 23, 42, 0.04);
+        }
+
+        .chat-label {
+            font-size: 0.82rem;
+            font-weight: 800;
+            color: #1e3a8a;
+            margin-bottom: 0.35rem;
+        }
+
         .small-note {
             color: #64748b !important;
             font-size: 0.86rem;
@@ -289,6 +313,11 @@ def apply_custom_css():
     )
 
 
+def initialize_session_state():
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+
+
 def build_source_label(metadata: Dict) -> str:
     file_name = metadata.get("file_name", "Unknown file")
     file_type = metadata.get("file_type", "Unknown")
@@ -312,6 +341,7 @@ def show_sources(docs: List[LCDocument], title: str = "Sources"):
 
     for doc in docs:
         label = build_source_label(doc.metadata)
+
         if label not in seen:
             seen.add(label)
             unique_docs.append(doc)
@@ -338,18 +368,51 @@ def get_embeddings():
         model="models/gemini-embedding-001",
         google_api_key=api_key
     )
-    
-    
+
+
+def save_chat_message(question: str, answer: str, source_docs: List[LCDocument]):
+    st.session_state.chat_history.append(
+        {
+            "question": question,
+            "answer": answer,
+            "sources": source_docs
+        }
+    )
+
+
+def build_chat_history_text() -> str:
+    lines = []
+
+    for index, item in enumerate(st.session_state.chat_history, start=1):
+        lines.append(f"Q{index}: {item['question']}")
+        lines.append(f"A{index}: {item['answer']}")
+        lines.append("Sources:")
+
+        seen = set()
+
+        for doc in item["sources"]:
+            label = build_source_label(doc.metadata)
+
+            if label not in seen:
+                seen.add(label)
+                lines.append(f"- {label}")
+
+        lines.append("")
+
+    return "\n".join(lines)
+
 def split_text_with_metadata(
     text: str,
     base_metadata: Dict
 ) -> List[LCDocument]:
+
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=5000,
         chunk_overlap=500
     )
 
     chunks = splitter.split_text(text)
+
     documents = []
 
     for index, chunk in enumerate(chunks, start=1):
@@ -367,22 +430,26 @@ def split_text_with_metadata(
 
 
 def extract_documents_from_pdfs(pdf_docs) -> List[LCDocument]:
+
     documents = []
 
     for pdf in pdf_docs:
         try:
             pdf.seek(0)
+
             reader = PdfReader(pdf)
 
             has_normal_text = False
 
             for page_index, page in enumerate(reader.pages, start=1):
+
                 page_text = page.extract_text() or ""
 
                 if page_text.strip():
+
                     has_normal_text = True
 
-                    docs = split_text_with_metadata(
+                    page_docs = split_text_with_metadata(
                         page_text,
                         {
                             "file_name": pdf.name,
@@ -391,17 +458,21 @@ def extract_documents_from_pdfs(pdf_docs) -> List[LCDocument]:
                         }
                     )
 
-                    documents.extend(docs)
+                    documents.extend(page_docs)
 
             if not has_normal_text:
+
                 pdf.seek(0)
+
                 images = convert_from_bytes(pdf.read())
 
                 for page_index, image in enumerate(images, start=1):
+
                     scanned_text = pytesseract.image_to_string(image)
 
                     if scanned_text.strip():
-                        docs = split_text_with_metadata(
+
+                        page_docs = split_text_with_metadata(
                             scanned_text,
                             {
                                 "file_name": pdf.name,
@@ -410,24 +481,30 @@ def extract_documents_from_pdfs(pdf_docs) -> List[LCDocument]:
                             }
                         )
 
-                        documents.extend(docs)
+                        documents.extend(page_docs)
 
         except Exception as e:
-            st.error(f"Error extracting PDF text from {pdf.name}: {e}")
+            st.error(
+                f"Error extracting PDF text from {pdf.name}: {e}"
+            )
 
     return documents
 
 
 def extract_documents_from_images(image_docs) -> List[LCDocument]:
+
     documents = []
 
     for image_file in image_docs:
+
         try:
             image = Image.open(image_file)
+
             image_text = pytesseract.image_to_string(image)
 
             if image_text.strip():
-                docs = split_text_with_metadata(
+
+                image_docs_generated = split_text_with_metadata(
                     image_text,
                     {
                         "file_name": image_file.name,
@@ -435,18 +512,22 @@ def extract_documents_from_images(image_docs) -> List[LCDocument]:
                     }
                 )
 
-                documents.extend(docs)
+                documents.extend(image_docs_generated)
 
         except Exception as e:
-            st.error(f"Error extracting image text from {image_file.name}: {e}")
+            st.error(
+                f"Error extracting image text from {image_file.name}: {e}"
+            )
 
     return documents
 
 
 def extract_documents_from_docx(docx_docs) -> List[LCDocument]:
+
     documents = []
 
     for docx_file in docx_docs:
+
         try:
             document = Document(docx_file)
 
@@ -457,16 +538,19 @@ def extract_documents_from_docx(docx_docs) -> List[LCDocument]:
                     docx_text += para.text + "\n"
 
             for table in document.tables:
+
                 for row in table.rows:
-                    row_text = []
+
+                    row_values = []
 
                     for cell in row.cells:
-                        row_text.append(cell.text.strip())
+                        row_values.append(cell.text.strip())
 
-                    docx_text += " | ".join(row_text) + "\n"
+                    docx_text += " | ".join(row_values) + "\n"
 
             if docx_text.strip():
-                docs = split_text_with_metadata(
+
+                docx_docs_generated = split_text_with_metadata(
                     docx_text,
                     {
                         "file_name": docx_file.name,
@@ -474,16 +558,22 @@ def extract_documents_from_docx(docx_docs) -> List[LCDocument]:
                     }
                 )
 
-                documents.extend(docs)
+                documents.extend(docx_docs_generated)
 
         except Exception as e:
-            st.error(f"Error extracting DOCX text from {docx_file.name}: {e}")
+            st.error(
+                f"Error extracting DOCX text from {docx_file.name}: {e}"
+            )
 
     return documents
 
 
-def create_faiss_vector_store(documents: List[LCDocument]):
+def create_faiss_vector_store(
+    documents: List[LCDocument]
+):
+
     try:
+
         embeddings = get_embeddings()
 
         vector_store = FAISS.from_documents(
@@ -491,17 +581,24 @@ def create_faiss_vector_store(documents: List[LCDocument]):
             embedding=embeddings
         )
 
-        vector_store.save_local(FAISS_INDEX_PATH)
+        vector_store.save_local(
+            FAISS_INDEX_PATH
+        )
 
         return vector_store
 
     except Exception as e:
-        st.error(f"Error creating FAISS vector store: {e}")
+        st.error(
+            f"Error creating FAISS vector store: {e}"
+        )
+
         return None
 
 
 def load_faiss_vector_store():
+
     try:
+
         embeddings = get_embeddings()
 
         return FAISS.load_local(
@@ -511,11 +608,19 @@ def load_faiss_vector_store():
         )
 
     except Exception as e:
-        st.error(f"Error loading FAISS vector store: {e}")
+
+        st.error(
+            f"Error loading FAISS vector store: {e}"
+        )
+
         return None
 
 
-def search_documents(query: str, k: int = 5) -> List[LCDocument]:
+def search_documents(
+    query: str,
+    k: int = 6
+) -> List[LCDocument]:
+
     vector_store = load_faiss_vector_store()
 
     if not vector_store:
@@ -525,8 +630,56 @@ def search_documents(query: str, k: int = 5) -> List[LCDocument]:
         query,
         k=k
     )
-    
+
+
+def reset_index():
+
+    if os.path.exists(FAISS_INDEX_PATH):
+
+        for file_name in os.listdir(
+            FAISS_INDEX_PATH
+        ):
+            os.remove(
+                os.path.join(
+                    FAISS_INDEX_PATH,
+                    file_name
+                )
+            )
+
+        os.rmdir(
+            FAISS_INDEX_PATH
+        )
+
+
+def get_file_type_counts(
+    uploaded_files
+):
+
+    counts = {
+        "PDF": 0,
+        "Image": 0,
+        "DOCX": 0
+    }
+
+    for file in uploaded_files:
+
+        name = file.name.lower()
+
+        if name.endswith(".pdf"):
+            counts["PDF"] += 1
+
+        elif name.endswith(
+            (".jpg", ".jpeg", ".png")
+        ):
+            counts["Image"] += 1
+
+        elif name.endswith(".docx"):
+            counts["DOCX"] += 1
+
+    return counts
+
 def initialize_qa_chain():
+
     prompt_template = """
 You are a helpful document assistant.
 
@@ -537,7 +690,6 @@ Rules:
 - Do not invent information.
 - If the answer is not available in the context, say:
   "I could not find this information in the uploaded document."
-- Do not mention source file names inside the answer unless the context clearly requires it.
 - The app will show source citations separately below your answer.
 
 Context:
@@ -557,7 +709,10 @@ Answer:
 
     prompt = PromptTemplate(
         template=prompt_template,
-        input_variables=["context", "question"]
+        input_variables=[
+            "context",
+            "question"
+        ]
     )
 
     return load_qa_chain(
@@ -568,6 +723,7 @@ Answer:
 
 
 def initialize_summary_chain():
+
     prompt_template = """
 You are a document summarization assistant.
 
@@ -624,7 +780,10 @@ def summarize_documents(
     if topic:
         query += " " + topic
 
-    docs = search_documents(query, k=6)
+    docs = search_documents(
+        query,
+        k=6
+    )
 
     if not docs:
         return "", []
@@ -639,6 +798,7 @@ def summarize_documents(
     }
 
     try:
+
         chain = initialize_summary_chain()
 
         response = chain(
@@ -657,7 +817,10 @@ def summarize_documents(
         return response["output_text"], docs
 
     except Exception as e:
-        st.error(f"Error generating summary: {e}")
+        st.error(
+            f"Error generating summary: {e}"
+        )
+
         return "", docs
 
 
@@ -671,12 +834,16 @@ def answer_user_question(
     if topic:
         query += " " + topic
 
-    docs = search_documents(query, k=6)
+    docs = search_documents(
+        query,
+        k=6
+    )
 
     if not docs:
         return "", []
 
     try:
+
         chain = initialize_qa_chain()
 
         response = chain(
@@ -690,23 +857,48 @@ def answer_user_question(
         return response["output_text"], docs
 
     except Exception as e:
-        st.error(f"Error generating answer: {e}")
+        st.error(
+            f"Error generating answer: {e}"
+        )
+
         return "", docs
 
 
 def generate_pdf_summary(summary):
+
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Arial", size=12)
+    pdf.set_font(
+        "Arial",
+        size=12
+    )
 
-    safe_summary = summary.encode("latin-1", "replace").decode("latin-1")
-    pdf.multi_cell(0, 10, txt=safe_summary, align="L")
+    safe_summary = summary.encode(
+        "latin-1",
+        "replace"
+    ).decode(
+        "latin-1"
+    )
 
-    return pdf.output(dest="S").encode("latin1")
+    pdf.multi_cell(
+        0,
+        10,
+        txt=safe_summary,
+        align="L"
+    )
+
+    return pdf.output(
+        dest="S"
+    ).encode(
+        "latin1"
+    )
 
 
 def download_pdf(summary):
-    pdf_data = generate_pdf_summary(summary)
+
+    pdf_data = generate_pdf_summary(
+        summary
+    )
 
     st.download_button(
         label="⬇️ Download PDF Summary",
@@ -716,40 +908,68 @@ def download_pdf(summary):
     )
 
 
-def reset_index():
-    if os.path.exists(FAISS_INDEX_PATH):
-        for file_name in os.listdir(FAISS_INDEX_PATH):
-            os.remove(os.path.join(FAISS_INDEX_PATH, file_name))
+def download_chat_history():
 
-        os.rmdir(FAISS_INDEX_PATH)
+    if not st.session_state.chat_history:
+        return
+
+    chat_text = build_chat_history_text()
+
+    st.download_button(
+        label="⬇️ Download Chat History",
+        data=chat_text,
+        file_name="chat_history.txt",
+        mime="text/plain"
+    )
 
 
-def get_file_type_counts(uploaded_files):
-    counts = {
-        "PDF": 0,
-        "Image": 0,
-        "DOCX": 0
-    }
+def render_chat_history():
 
-    for file in uploaded_files:
-        name = file.name.lower()
+    if not st.session_state.chat_history:
+        st.info(
+            "No chat yet. Ask a question after processing your documents."
+        )
+        return
 
-        if name.endswith(".pdf"):
-            counts["PDF"] += 1
-        elif name.endswith((".jpg", ".jpeg", ".png")):
-            counts["Image"] += 1
-        elif name.endswith(".docx"):
-            counts["DOCX"] += 1
+    for index, item in enumerate(
+        st.session_state.chat_history,
+        start=1
+    ):
 
-    return counts
+        st.markdown(
+            f"""
+            <div class="chat-user-card">
+                <div class="chat-label">You · Question {index}</div>
+                {item["question"]}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
+        st.markdown(
+            f"""
+            <div class="chat-ai-card">
+                <div class="chat-label">Assistant · Answer {index}</div>
+                {item["answer"]}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        show_sources(
+            item["sources"],
+            title=f"Sources for Answer {index}"
+        )
+        
 def main():
+
     st.set_page_config(
         page_title="Document Summary Assistant",
         page_icon="📄",
         layout="wide"
     )
 
+    initialize_session_state()
     apply_custom_css()
 
     st.markdown(
@@ -758,7 +978,7 @@ def main():
             <div class="main-title">📄 Document Summary Assistant</div>
             <div class="sub-title">
                 Chat with PDF, scanned PDF, image, and DOCX files using Gemini AI.
-                Answers now include source citations and preview chunks.
+                Includes source citations, previews, and chat history.
             </div>
         </div>
         """,
@@ -766,7 +986,9 @@ def main():
     )
 
     with st.sidebar:
+
         st.markdown("## 📂 Upload Center")
+
         st.markdown(
             '<p class="small-note">Supported: PDF, scanned PDF, JPG, PNG, DOCX.</p>',
             unsafe_allow_html=True
@@ -775,11 +997,20 @@ def main():
         uploaded_files = st.file_uploader(
             "Upload your files",
             accept_multiple_files=True,
-            type=["pdf", "jpg", "jpeg", "png", "docx"]
+            type=[
+                "pdf",
+                "jpg",
+                "jpeg",
+                "png",
+                "docx"
+            ]
         )
 
         if uploaded_files:
-            counts = get_file_type_counts(uploaded_files)
+
+            counts = get_file_type_counts(
+                uploaded_files
+            )
 
             st.markdown("### 📊 Upload Summary")
 
@@ -821,7 +1052,11 @@ def main():
             st.markdown("### 📁 Selected Files")
 
             for file in uploaded_files:
-                size_kb = round(file.size / 1024, 2)
+
+                size_kb = round(
+                    file.size / 1024,
+                    2
+                )
 
                 st.markdown(
                     f"""
@@ -843,9 +1078,24 @@ def main():
             use_container_width=True
         ):
             reset_index()
-            st.success("Saved FAISS index removed.")
+            st.success(
+                "Saved FAISS index removed."
+            )
 
-        if os.path.exists(FAISS_INDEX_PATH):
+        if st.button(
+            "🗑️ Clear Chat History",
+            use_container_width=True
+        ):
+            st.session_state.chat_history = []
+            st.success(
+                "Chat history cleared."
+            )
+
+        download_chat_history()
+
+        if os.path.exists(
+            FAISS_INDEX_PATH
+        ):
             st.markdown(
                 """
                 <div class="status-box">
@@ -865,7 +1115,11 @@ def main():
             )
 
     if uploaded_files:
-        file_names = [file.name for file in uploaded_files]
+
+        file_names = [
+            file.name
+            for file in uploaded_files
+        ]
 
         st.markdown("### 🧾 File Selection")
 
@@ -876,73 +1130,125 @@ def main():
         )
 
         if process_button:
+
             selected_uploaded_files = [
-                file for file in uploaded_files
+                file
+                for file in uploaded_files
                 if file.name in selected_files
             ]
 
             if not selected_uploaded_files:
-                st.warning("Please select at least one file.")
+                st.warning(
+                    "Please select at least one file."
+                )
                 return
 
             progress_bar = st.progress(0)
             status_area = st.empty()
 
-            with st.spinner("Extracting text and creating vector index..."):
-                status_area.info("Step 1/4: Sorting uploaded files...")
+            with st.spinner(
+                "Extracting text and creating vector index..."
+            ):
+
+                status_area.info(
+                    "Step 1/4: Sorting uploaded files..."
+                )
                 progress_bar.progress(15)
 
                 pdf_files = [
-                    file for file in selected_uploaded_files
+                    file
+                    for file in selected_uploaded_files
                     if file.type == "application/pdf"
                     or file.name.lower().endswith(".pdf")
                 ]
 
                 image_files = [
-                    file for file in selected_uploaded_files
+                    file
+                    for file in selected_uploaded_files
                     if file.type.startswith("image/")
                 ]
 
                 docx_files = [
-                    file for file in selected_uploaded_files
+                    file
+                    for file in selected_uploaded_files
                     if file.name.lower().endswith(".docx")
                 ]
 
-                status_area.info("Step 2/4: Extracting text with metadata...")
+                status_area.info(
+                    "Step 2/4: Extracting text with metadata..."
+                )
                 progress_bar.progress(40)
 
                 documents = []
-                documents.extend(extract_documents_from_pdfs(pdf_files))
-                documents.extend(extract_documents_from_images(image_files))
-                documents.extend(extract_documents_from_docx(docx_files))
+
+                documents.extend(
+                    extract_documents_from_pdfs(
+                        pdf_files
+                    )
+                )
+
+                documents.extend(
+                    extract_documents_from_images(
+                        image_files
+                    )
+                )
+
+                documents.extend(
+                    extract_documents_from_docx(
+                        docx_files
+                    )
+                )
 
                 if documents:
-                    status_area.info("Step 3/4: Preparing chunks and source metadata...")
+
+                    status_area.info(
+                        "Step 3/4: Preparing chunks and source metadata..."
+                    )
                     progress_bar.progress(65)
 
-                    status_area.info("Step 4/4: Creating FAISS vector index...")
+                    status_area.info(
+                        "Step 4/4: Creating FAISS vector index..."
+                    )
                     progress_bar.progress(85)
 
-                    vector_store = create_faiss_vector_store(documents)
+                    vector_store = create_faiss_vector_store(
+                        documents
+                    )
 
                     if vector_store:
+
                         progress_bar.progress(100)
+
                         status_area.success(
                             f"Files processed successfully. Created {len(documents)} indexed chunks with sources."
                         )
+
                     else:
+
                         status_area.error(
                             "Text was extracted, but FAISS creation failed. Check your Google API key."
                         )
+
                 else:
-                    status_area.error("No extractable text found.")
+
+                    status_area.error(
+                        "No extractable text found."
+                    )
 
     st.divider()
 
-    col1, col2 = st.columns(2, gap="large")
+    col1, col2 = st.columns(
+        2,
+        gap="large"
+    )
 
     with col1:
-        with st.expander("📜 Summarize Content", expanded=True):
+
+        with st.expander(
+            "📜 Summarize Content",
+            expanded=True
+        ):
+
             user_topic = st.text_input(
                 "Topic optional",
                 placeholder="Example: security, introduction, conclusion"
@@ -955,19 +1261,37 @@ def main():
 
             summary_length = st.selectbox(
                 "Summary length",
-                ["short", "medium", "long"]
+                [
+                    "short",
+                    "medium",
+                    "long"
+                ]
             )
 
             if st.button(
                 "✍️ Generate Summary",
                 use_container_width=True
             ):
-                if not os.path.exists(FAISS_INDEX_PATH):
-                    st.warning("Please process files first.")
+
+                if not os.path.exists(
+                    FAISS_INDEX_PATH
+                ):
+                    st.warning(
+                        "Please process files first."
+                    )
+
                 elif not user_instruction.strip():
-                    st.warning("Please enter summary instruction.")
+
+                    st.warning(
+                        "Please enter summary instruction."
+                    )
+
                 else:
-                    with st.spinner("Generating summary with source tracking..."):
+
+                    with st.spinner(
+                        "Generating summary with source tracking..."
+                    ):
+
                         summary, source_docs = summarize_documents(
                             user_instruction=user_instruction,
                             topic=user_topic,
@@ -975,13 +1299,31 @@ def main():
                         )
 
                         if summary:
-                            st.success("Summary generated")
-                            st.write(summary)
-                            download_pdf(summary)
-                            show_sources(source_docs, title="Summary Sources")
+
+                            st.success(
+                                "Summary generated"
+                            )
+
+                            st.write(
+                                summary
+                            )
+
+                            download_pdf(
+                                summary
+                            )
+
+                            show_sources(
+                                source_docs,
+                                title="Summary Sources"
+                            )
 
     with col2:
-        with st.expander("💬 Ask Questions", expanded=True):
+
+        with st.expander(
+            "💬 Ask Questions",
+            expanded=True
+        ):
+
             user_topic_for_question = st.text_input(
                 "Question topic optional",
                 placeholder="Example: eligibility, cost, features"
@@ -994,24 +1336,52 @@ def main():
             )
 
             if st.button(
-                "🔍 Get Answer",
+                "🔍 Ask and Save to Chat",
                 use_container_width=True
             ):
-                if not os.path.exists(FAISS_INDEX_PATH):
-                    st.warning("Please process files first.")
+
+                if not os.path.exists(
+                    FAISS_INDEX_PATH
+                ):
+
+                    st.warning(
+                        "Please process files first."
+                    )
+
                 elif not user_question.strip():
-                    st.warning("Please enter a question.")
+
+                    st.warning(
+                        "Please enter a question."
+                    )
+
                 else:
-                    with st.spinner("Finding answer with source tracking..."):
+
+                    with st.spinner(
+                        "Finding answer with source tracking..."
+                    ):
+
                         answer, source_docs = answer_user_question(
                             user_question=user_question,
                             topic=user_topic_for_question
                         )
 
                         if answer:
-                            st.success("Answer found")
-                            st.write(answer)
-                            show_sources(source_docs, title="Answer Sources")
+
+                            save_chat_message(
+                                user_question,
+                                answer,
+                                source_docs
+                            )
+
+                            st.success(
+                                "Answer saved to chat history"
+                            )
+
+    st.divider()
+
+    st.markdown("## 💬 Chat History")
+
+    render_chat_history()
 
 
 if __name__ == "__main__":
