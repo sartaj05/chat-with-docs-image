@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import shutil
 import platform
 from typing import List, Dict, Tuple
@@ -12,6 +13,7 @@ from PyPDF2 import PdfReader
 from docx import Document
 from pdf2image import convert_from_bytes
 from fpdf import FPDF
+from rank_bm25 import BM25Okapi
 
 import google.generativeai as genai
 
@@ -41,6 +43,7 @@ if platform.system() == "Windows":
 
 COLLECTIONS_DIR = "collections"
 DEFAULT_COLLECTION = "default"
+DOCUMENTS_JSON = "documents.json"
 
 
 def apply_custom_css():
@@ -156,6 +159,17 @@ def apply_custom_css():
             border: 1px solid #bfd4ef;
             margin-bottom: 0.55rem;
             font-size: 0.92rem;
+        }
+
+        .score-pill {
+            display: inline-block;
+            padding: 0.18rem 0.55rem;
+            border-radius: 999px;
+            background: #dbeafe;
+            color: #1e3a8a;
+            font-size: 0.78rem;
+            font-weight: 800;
+            margin-left: 0.4rem;
         }
 
         .chat-user-card {
@@ -367,6 +381,16 @@ def get_collection_path(
     )
 
 
+def get_documents_json_path(
+    collection_name: str
+) -> str:
+
+    return os.path.join(
+        get_collection_path(collection_name),
+        DOCUMENTS_JSON
+    )
+
+
 def collection_exists(
     collection_name: str
 ) -> bool:
@@ -375,15 +399,8 @@ def collection_exists(
         collection_name
     )
 
-    return (
-        os.path.exists(path)
-        and
-        os.path.exists(
-            os.path.join(
-                path,
-                "index.faiss"
-            )
-        )
+    return os.path.exists(
+        path
     )
 
 
@@ -469,6 +486,83 @@ def delete_collection(
     return True
 
 
+def get_collection_index_path(
+    collection_name: str
+):
+
+    return get_collection_path(
+        collection_name
+    )
+
+
+def collection_has_index(
+    collection_name: str
+):
+
+    path = get_collection_index_path(
+        collection_name
+    )
+
+    return (
+        os.path.exists(
+            os.path.join(
+                path,
+                "index.faiss"
+            )
+        )
+        and
+        os.path.exists(
+            os.path.join(
+                path,
+                "index.pkl"
+            )
+        )
+    )
+
+
+def collection_has_documents_json(
+    collection_name: str
+):
+
+    return os.path.exists(
+        get_documents_json_path(
+            collection_name
+        )
+    )
+
+
+def reset_collection_index(
+    collection_name: str
+):
+
+    path = get_collection_index_path(
+        collection_name
+    )
+
+    faiss_file = os.path.join(
+        path,
+        "index.faiss"
+    )
+
+    pkl_file = os.path.join(
+        path,
+        "index.pkl"
+    )
+
+    documents_file = get_documents_json_path(
+        collection_name
+    )
+
+    if os.path.exists(faiss_file):
+        os.remove(faiss_file)
+
+    if os.path.exists(pkl_file):
+        os.remove(pkl_file)
+
+    if os.path.exists(documents_file):
+        os.remove(documents_file)
+
+
 def get_chat_history(
     collection_name: str
 ):
@@ -516,117 +610,6 @@ def clear_chat_history(
     ] = []
 
 
-def build_chat_history_text(
-    collection_name: str
-):
-
-    history = get_chat_history(
-        collection_name
-    )
-
-    lines = []
-
-    for index, item in enumerate(
-        history,
-        start=1
-    ):
-
-        lines.append(
-            f"Q{index}: {item['question']}"
-        )
-
-        lines.append(
-            f"A{index}: {item['answer']}"
-        )
-
-        lines.append("Sources:")
-
-        seen = set()
-
-        for doc in item["sources"]:
-
-            label = build_source_label(
-                doc.metadata
-            )
-
-            if label not in seen:
-                seen.add(label)
-                lines.append(
-                    f"- {label}"
-                )
-
-        lines.append("")
-
-    return "\n".join(lines)
-
-
-def get_collection_index_path(
-    collection_name: str
-):
-
-    return get_collection_path(
-        collection_name
-    )
-
-
-def collection_has_index(
-    collection_name: str
-):
-
-    path = get_collection_index_path(
-        collection_name
-    )
-
-    return (
-        os.path.exists(
-            os.path.join(
-                path,
-                "index.faiss"
-            )
-        )
-        and
-        os.path.exists(
-            os.path.join(
-                path,
-                "index.pkl"
-            )
-        )
-    )
-
-
-def reset_collection_index(
-    collection_name: str
-):
-
-    path = get_collection_index_path(
-        collection_name
-    )
-
-    faiss_file = os.path.join(
-        path,
-        "index.faiss"
-    )
-
-    pkl_file = os.path.join(
-        path,
-        "index.pkl"
-    )
-
-    if os.path.exists(
-        faiss_file
-    ):
-        os.remove(
-            faiss_file
-        )
-
-    if os.path.exists(
-        pkl_file
-    ):
-        os.remove(
-            pkl_file
-        )
-
-
 def build_source_label(
     metadata: Dict
 ) -> str:
@@ -663,11 +646,161 @@ def build_source_label(
     )
 
 
+def build_chat_history_text(
+    collection_name: str
+):
+
+    history = get_chat_history(
+        collection_name
+    )
+
+    lines = []
+
+    for index, item in enumerate(
+        history,
+        start=1
+    ):
+
+        lines.append(
+            f"Q{index}: {item['question']}"
+        )
+
+        lines.append(
+            f"A{index}: {item['answer']}"
+        )
+
+        lines.append("Sources:")
+
+        seen = set()
+
+        for doc in item["sources"]:
+
+            label = build_source_label(
+                doc.metadata
+            )
+
+            if label not in seen:
+                seen.add(label)
+                lines.append(f"- {label}")
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def get_embeddings():
 
     return GoogleGenerativeAIEmbeddings(
         model="models/gemini-embedding-001",
         google_api_key=api_key
+    )
+
+
+def tokenize_text(text: str):
+
+    text = text.lower()
+
+    return re.findall(
+        r"\\b\\w+\\b",
+        text
+    )
+
+
+def serialize_documents(
+    documents: List[LCDocument]
+):
+
+    serialized = []
+
+    for doc in documents:
+        serialized.append(
+            {
+                "page_content": doc.page_content,
+                "metadata": doc.metadata
+            }
+        )
+
+    return serialized
+
+
+def deserialize_documents(
+    raw_documents
+) -> List[LCDocument]:
+
+    documents = []
+
+    for item in raw_documents:
+        documents.append(
+            LCDocument(
+                page_content=item.get(
+                    "page_content",
+                    ""
+                ),
+                metadata=item.get(
+                    "metadata",
+                    {}
+                )
+            )
+        )
+
+    return documents
+
+
+def save_documents_json(
+    collection_name: str,
+    documents: List[LCDocument]
+):
+
+    path = get_collection_path(
+        collection_name
+    )
+
+    os.makedirs(
+        path,
+        exist_ok=True
+    )
+
+    json_path = get_documents_json_path(
+        collection_name
+    )
+
+    with open(
+        json_path,
+        "w",
+        encoding="utf-8"
+    ) as file:
+        json.dump(
+            serialize_documents(
+                documents
+            ),
+            file,
+            ensure_ascii=False,
+            indent=2
+        )
+
+
+def load_documents_json(
+    collection_name: str
+) -> List[LCDocument]:
+
+    json_path = get_documents_json_path(
+        collection_name
+    )
+
+    if not os.path.exists(
+        json_path
+    ):
+        return []
+
+    with open(
+        json_path,
+        "r",
+        encoding="utf-8"
+    ) as file:
+        raw_documents = json.load(file)
+
+    return deserialize_documents(
+        raw_documents
     )
     
 def split_text_with_metadata(
@@ -915,6 +1048,11 @@ def create_faiss_vector_store(
             collection_path
         )
 
+        save_documents_json(
+            collection_name,
+            documents
+        )
+
         return vector_store
 
     except Exception as e:
@@ -951,11 +1089,11 @@ def load_faiss_vector_store(
         return None
 
 
-def search_documents(
+def vector_search_documents(
     collection_name: str,
     query: str,
-    k: int = 6
-) -> List[LCDocument]:
+    k: int = 8
+) -> List[Tuple[LCDocument, float]]:
 
     vector_store = load_faiss_vector_store(
         collection_name
@@ -964,8 +1102,250 @@ def search_documents(
     if not vector_store:
         return []
 
-    return vector_store.similarity_search(
+    try:
+        results = vector_store.similarity_search_with_score(
+            query,
+            k=k
+        )
+
+        normalized_results = []
+
+        for doc, distance in results:
+
+            score = 1 / (1 + float(distance))
+
+            doc.metadata["vector_score"] = round(
+                score,
+                4
+            )
+
+            normalized_results.append(
+                (doc, score)
+            )
+
+        return normalized_results
+
+    except Exception as e:
+        st.error(
+            f"Vector search failed: {e}"
+        )
+        return []
+
+
+def bm25_keyword_search_documents(
+    collection_name: str,
+    query: str,
+    k: int = 8
+) -> List[Tuple[LCDocument, float]]:
+
+    documents = load_documents_json(
+        collection_name
+    )
+
+    if not documents:
+        return []
+
+    tokenized_docs = [
+        tokenize_text(
+            doc.page_content
+        )
+        for doc in documents
+    ]
+
+    query_tokens = tokenize_text(
+        query
+    )
+
+    if not query_tokens:
+        return []
+
+    bm25 = BM25Okapi(
+        tokenized_docs
+    )
+
+    scores = bm25.get_scores(
+        query_tokens
+    )
+
+    scored_docs = []
+
+    max_score = max(scores) if len(scores) else 0
+
+    for doc, score in zip(
+        documents,
+        scores
+    ):
+
+        if score <= 0:
+            continue
+
+        normalized_score = (
+            float(score) / float(max_score)
+            if max_score > 0
+            else 0
+        )
+
+        doc.metadata["keyword_score"] = round(
+            normalized_score,
+            4
+        )
+
+        scored_docs.append(
+            (
+                doc,
+                normalized_score
+            )
+        )
+
+    scored_docs.sort(
+        key=lambda item: item[1],
+        reverse=True
+    )
+
+    return scored_docs[:k]
+
+def make_doc_key(
+    doc: LCDocument
+) -> str:
+
+    metadata = doc.metadata
+
+    return "|".join(
+        [
+            metadata.get(
+                "file_name",
+                ""
+            ),
+            metadata.get(
+                "file_type",
+                ""
+            ),
+            str(
+                metadata.get(
+                    "page",
+                    ""
+                )
+            ),
+            str(
+                metadata.get(
+                    "chunk",
+                    ""
+                )
+            )
+        ]
+    )
+
+
+def hybrid_search_documents(
+    collection_name: str,
+    query: str,
+    k: int = 8
+) -> List[LCDocument]:
+
+    vector_results = vector_search_documents(
+        collection_name,
         query,
+        k=k
+    )
+
+    keyword_results = bm25_keyword_search_documents(
+        collection_name,
+        query,
+        k=k
+    )
+
+    merged = {}
+
+    for doc, score in vector_results:
+
+        key = make_doc_key(
+            doc
+        )
+
+        if key not in merged:
+            merged[key] = {
+                "doc": doc,
+                "vector_score": 0.0,
+                "keyword_score": 0.0
+            }
+
+        merged[key]["vector_score"] = max(
+            merged[key]["vector_score"],
+            score
+        )
+
+    for doc, score in keyword_results:
+
+        key = make_doc_key(
+            doc
+        )
+
+        if key not in merged:
+            merged[key] = {
+                "doc": doc,
+                "vector_score": 0.0,
+                "keyword_score": 0.0
+            }
+
+        merged[key]["keyword_score"] = max(
+            merged[key]["keyword_score"],
+            score
+        )
+
+    ranked = []
+
+    for item in merged.values():
+
+        vector_score = item["vector_score"]
+        keyword_score = item["keyword_score"]
+
+        final_score = (
+            vector_score * 0.65
+            +
+            keyword_score * 0.35
+        )
+
+        doc = item["doc"]
+
+        doc.metadata["vector_score"] = round(
+            vector_score,
+            4
+        )
+
+        doc.metadata["keyword_score"] = round(
+            keyword_score,
+            4
+        )
+
+        doc.metadata["final_score"] = round(
+            final_score,
+            4
+        )
+
+        ranked.append(
+            doc
+        )
+
+    ranked.sort(
+        key=lambda doc: doc.metadata.get(
+            "final_score",
+            0
+        ),
+        reverse=True
+    )
+
+    return ranked[:k]
+
+
+def search_documents(
+    collection_name: str,
+    query: str,
+    k: int = 6
+) -> List[LCDocument]:
+
+    return hybrid_search_documents(
+        collection_name=collection_name,
+        query=query,
         k=k
     )
 
@@ -1008,6 +1388,21 @@ def show_sources(
             doc.metadata
         )
 
+        final_score = doc.metadata.get(
+            "final_score",
+            0
+        )
+
+        vector_score = doc.metadata.get(
+            "vector_score",
+            0
+        )
+
+        keyword_score = doc.metadata.get(
+            "keyword_score",
+            0
+        )
+
         preview = doc.page_content[
             :900
         ].strip()
@@ -1016,6 +1411,11 @@ def show_sources(
             f"""
             <div class="source-card">
                 <b>{i}. {label}</b>
+                <span class="score-pill">Score: {final_score}</span>
+                <br>
+                <span class="small-note">
+                    Vector: {vector_score} · Keyword: {keyword_score}
+                </span>
             </div>
             """,
             unsafe_allow_html=True
@@ -1028,7 +1428,6 @@ def show_sources(
             st.write(
                 preview
             )
-            
 def initialize_qa_chain():
 
     prompt_template = """
@@ -1042,6 +1441,7 @@ Rules:
 - If the answer is not available in the context, say:
   "I could not find this information in the uploaded document."
 - The app will show source citations separately below your answer.
+- The context was selected using hybrid search with vector and keyword ranking.
 
 Context:
 {context}
@@ -1091,6 +1491,7 @@ Rules:
 - Do not invent information.
 - Keep the result useful and structured.
 - The app will show source citations separately below the summary.
+- The context was selected using hybrid search with vector and keyword ranking.
 
 Context:
 {context}
@@ -1333,24 +1734,6 @@ def render_chat_history(
             item["sources"],
             title=f"Sources for Answer {index}"
         )
-def get_file_type_counts(uploaded_files):
-    counts = {
-        "PDF": 0,
-        "Image": 0,
-        "DOCX": 0
-    }
-
-    for file in uploaded_files:
-        name = file.name.lower()
-
-        if name.endswith(".pdf"):
-            counts["PDF"] += 1
-        elif name.endswith((".jpg", ".jpeg", ".png")):
-            counts["Image"] += 1
-        elif name.endswith(".docx"):
-            counts["DOCX"] += 1
-
-    return counts
         
 def main():
 
@@ -1369,8 +1752,8 @@ def main():
         <div class="hero-card">
             <div class="main-title">📄 Document Summary Assistant</div>
             <div class="sub-title">
-                Organize documents into collections, summarize them, ask questions,
-                and verify answers with source citations.
+                Hybrid search assistant for PDF, scanned PDF, image, and DOCX collections.
+                Uses vector + keyword retrieval with source citations and relevance scores.
             </div>
         </div>
         """,
@@ -1417,14 +1800,14 @@ def main():
         )
 
         st.session_state.active_collection = selected_collection
-
         active_collection = st.session_state.active_collection
 
         st.markdown(
             f"""
             <div class="collection-card">
                 📁 Active Collection:<br>
-                <b>{active_collection}</b>
+                <b>{active_collection}</b><br>
+                <span class="small-note">Hybrid Search: Vector + Keyword</span>
             </div>
             """,
             unsafe_allow_html=True
@@ -1523,11 +1906,13 @@ def main():
             reset_collection_index(
                 active_collection
             )
+
             clear_chat_history(
                 active_collection
             )
+
             st.success(
-                f"Index reset for: {active_collection}"
+                f"Index and chat reset for: {active_collection}"
             )
 
         if active_collection != DEFAULT_COLLECTION:
@@ -1557,6 +1942,7 @@ def main():
             clear_chat_history(
                 active_collection
             )
+
             st.success(
                 "Chat history cleared for this collection."
             )
@@ -1567,11 +1953,13 @@ def main():
 
         if collection_has_index(
             active_collection
+        ) and collection_has_documents_json(
+            active_collection
         ):
             st.markdown(
                 """
                 <div class="status-box">
-                    ✅ Collection index is ready. You can summarize or ask questions.
+                    ✅ Collection is ready. Hybrid search is available.
                 </div>
                 """,
                 unsafe_allow_html=True
@@ -1580,7 +1968,7 @@ def main():
             st.markdown(
                 """
                 <div class="status-box">
-                    ℹ️ No index for this collection. Upload and process files first.
+                    ℹ️ No searchable index for this collection. Upload and process files first.
                 </div>
                 """,
                 unsafe_allow_html=True
@@ -1623,9 +2011,9 @@ def main():
             ):
 
                 status_area.info(
-                    "Step 1/4: Sorting uploaded files..."
+                    "Step 1/5: Sorting uploaded files..."
                 )
-                progress_bar.progress(15)
+                progress_bar.progress(12)
 
                 pdf_files = [
                     file
@@ -1647,9 +2035,9 @@ def main():
                 ]
 
                 status_area.info(
-                    "Step 2/4: Extracting text with metadata..."
+                    "Step 2/5: Extracting text with metadata..."
                 )
-                progress_bar.progress(40)
+                progress_bar.progress(35)
 
                 documents = []
 
@@ -1674,14 +2062,19 @@ def main():
                 if documents:
 
                     status_area.info(
-                        "Step 3/4: Preparing source metadata..."
+                        "Step 3/5: Saving chunks for keyword search..."
                     )
-                    progress_bar.progress(65)
+                    progress_bar.progress(58)
+
+                    save_documents_json(
+                        active_collection,
+                        documents
+                    )
 
                     status_area.info(
-                        "Step 4/4: Creating collection index..."
+                        "Step 4/5: Creating vector index..."
                     )
-                    progress_bar.progress(85)
+                    progress_bar.progress(80)
 
                     vector_store = create_faiss_vector_store(
                         active_collection,
@@ -1693,13 +2086,13 @@ def main():
                         progress_bar.progress(100)
 
                         status_area.success(
-                            f"Collection '{active_collection}' updated with {len(documents)} indexed chunks."
+                            f"Collection '{active_collection}' updated with {len(documents)} chunks. Hybrid search is ready."
                         )
 
                     else:
 
                         status_area.error(
-                            "Text was extracted, but FAISS creation failed. Check your Google API key."
+                            "Text was extracted, but vector index creation failed. Check your Google API key."
                         )
 
                 else:
@@ -1713,7 +2106,8 @@ def main():
     st.markdown(
         f"""
         <div class="collection-card">
-            Working inside collection: <b>{st.session_state.active_collection}</b>
+            Working inside collection: <b>{st.session_state.active_collection}</b><br>
+            <span class="small-note">Search mode: Hybrid vector + keyword re-ranking</span>
         </div>
         """,
         unsafe_allow_html=True
@@ -1758,8 +2152,17 @@ def main():
                 if not collection_has_index(
                     active_collection
                 ):
+
                     st.warning(
                         "Please process files into this collection first."
+                    )
+
+                elif not collection_has_documents_json(
+                    active_collection
+                ):
+
+                    st.warning(
+                        "Please reprocess this collection to enable hybrid search."
                     )
 
                 elif not user_instruction.strip():
@@ -1771,7 +2174,7 @@ def main():
                 else:
 
                     with st.spinner(
-                        "Generating summary from active collection..."
+                        "Generating summary using hybrid search..."
                     ):
 
                         summary, source_docs = summarize_documents(
@@ -1831,6 +2234,14 @@ def main():
                         "Please process files into this collection first."
                     )
 
+                elif not collection_has_documents_json(
+                    active_collection
+                ):
+
+                    st.warning(
+                        "Please reprocess this collection to enable hybrid search."
+                    )
+
                 elif not user_question.strip():
 
                     st.warning(
@@ -1840,7 +2251,7 @@ def main():
                 else:
 
                     with st.spinner(
-                        "Finding answer from active collection..."
+                        "Finding answer using hybrid search..."
                     ):
 
                         answer, source_docs = answer_user_question(
@@ -1875,4 +2286,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
