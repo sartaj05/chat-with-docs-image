@@ -1,5 +1,6 @@
 import os
 import platform
+from typing import List, Dict, Tuple
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -14,6 +15,7 @@ import google.generativeai as genai
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document as LCDocument
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.chains.question_answering import load_qa_chain
@@ -30,7 +32,7 @@ if not api_key:
 genai.configure(api_key=api_key)
 
 if platform.system() == "Windows":
-    tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    tesseract_path = r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
     if os.path.exists(tesseract_path):
         pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
@@ -44,9 +46,9 @@ def apply_custom_css():
         <style>
         .stApp {
             background:
-                radial-gradient(circle at top left, rgba(191, 219, 254, 0.58), transparent 32%),
-                radial-gradient(circle at top right, rgba(221, 214, 254, 0.48), transparent 30%),
-                linear-gradient(135deg, #f6f9ff 0%, #eef6ff 45%, #f8f7ff 100%);
+                radial-gradient(circle at top left, rgba(147, 197, 253, 0.20), transparent 34%),
+                radial-gradient(circle at top right, rgba(196, 181, 253, 0.18), transparent 32%),
+                linear-gradient(135deg, #eaf1f8 0%, #e7eef7 45%, #edf0f6 100%);
             color: #172033;
         }
 
@@ -61,8 +63,8 @@ def apply_custom_css():
         }
 
         section[data-testid="stSidebar"] {
-            background: linear-gradient(180deg, #fbfdff 0%, #eef6ff 100%);
-            border-right: 1px solid #cfe0f6;
+            background: linear-gradient(180deg, #f4f8fb 0%, #e7eef6 100%);
+            border-right: 1px solid #c8d7ea;
         }
 
         section[data-testid="stSidebar"] * {
@@ -86,19 +88,19 @@ def apply_custom_css():
         .hero-card {
             padding: 1.25rem 1.7rem;
             border-radius: 22px;
-            background: linear-gradient(135deg, #fffefe 0%, #f8fbff 100%);
-            border: 1px solid #d7e7fb;
-            box-shadow: 0 12px 34px rgba(37, 99, 235, 0.09);
+            background: linear-gradient(135deg, #f9fbfd 0%, #f1f6fb 100%);
+            border: 1px solid #cbdcf0;
+            box-shadow: 0 10px 28px rgba(30, 64, 175, 0.07);
             margin-bottom: 1.6rem;
         }
 
         .metric-card {
             padding: 0.75rem;
             border-radius: 15px;
-            background: linear-gradient(135deg, #ffffff 0%, #f1f7ff 100%);
-            border: 1px solid #dbeafe;
+            background: linear-gradient(135deg, #f8fbfd 0%, #eef5fb 100%);
+            border: 1px solid #cbdcf0;
             text-align: center;
-            box-shadow: 0 6px 16px rgba(15, 23, 42, 0.04);
+            box-shadow: 0 6px 16px rgba(15, 23, 42, 0.035);
         }
 
         .metric-number {
@@ -116,22 +118,31 @@ def apply_custom_css():
         .status-box {
             padding: 0.95rem;
             border-radius: 16px;
-            background: linear-gradient(135deg, #ecfdf5 0%, #eff6ff 100%);
-            border: 1px solid #bfdbfe;
+            background: linear-gradient(135deg, #e4f4ee 0%, #e7f0fa 100%);
+            border: 1px solid #b8d4e8;
             color: #0f3f5f !important;
             font-weight: 750;
             margin-top: 1rem;
             line-height: 1.55;
-            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.04);
+            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.035);
         }
 
         .file-card {
             padding: 0.75rem 0.9rem;
             border-radius: 13px;
-            background: linear-gradient(135deg, #ffffff 0%, #f6faff 100%);
-            border: 1px solid #dbeafe;
+            background: linear-gradient(135deg, #f8fbfd 0%, #eef5fb 100%);
+            border: 1px solid #cbdcf0;
             margin-bottom: 0.5rem;
-            box-shadow: 0 5px 14px rgba(15, 23, 42, 0.035);
+            box-shadow: 0 5px 14px rgba(15, 23, 42, 0.03);
+        }
+
+        .source-card {
+            padding: 0.75rem 0.9rem;
+            border-radius: 13px;
+            background: #eef6ff;
+            border: 1px solid #bfd4ef;
+            margin-bottom: 0.55rem;
+            font-size: 0.92rem;
         }
 
         .small-note {
@@ -141,18 +152,18 @@ def apply_custom_css():
         }
 
         div[data-testid="stExpander"] {
-            background: linear-gradient(180deg, #fffefe 0%, #f8fbff 100%);
-            border: 1px solid #d8e6fb;
+            background: linear-gradient(180deg, #f9fbfd 0%, #f2f6fa 100%);
+            border: 1px solid #cbdcf0;
             border-radius: 18px;
-            box-shadow: 0 14px 32px rgba(30, 64, 175, 0.08);
+            box-shadow: 0 12px 28px rgba(30, 64, 175, 0.07);
             overflow: hidden;
         }
 
         div[data-testid="stExpander"] summary {
-            background: linear-gradient(90deg, #f3f8ff 0%, #f8f7ff 100%);
+            background: linear-gradient(90deg, #eaf2fb 0%, #eef1fa 100%);
             color: #163b88 !important;
             font-weight: 800;
-            border-bottom: 1px solid #dbeafe;
+            border-bottom: 1px solid #d2dfef;
             padding: 0.78rem 1rem !important;
         }
 
@@ -168,17 +179,17 @@ def apply_custom_css():
 
         .stTextInput input,
         .stTextArea textarea {
-            background: #fbfdff !important;
+            background: #f8fafc !important;
             color: #172033 !important;
-            border: 1px solid #bdd3ef !important;
+            border: 1px solid #aebfd4 !important;
             border-radius: 14px !important;
             box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.03) !important;
         }
 
         .stTextInput input:focus,
         .stTextArea textarea:focus {
-            border: 1px solid #60a5fa !important;
-            box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.18) !important;
+            border: 1px solid #5b9beb !important;
+            box-shadow: 0 0 0 3px rgba(91, 155, 235, 0.16) !important;
         }
 
         .stTextInput input::placeholder,
@@ -187,9 +198,9 @@ def apply_custom_css():
         }
 
         div[data-baseweb="select"] > div {
-            background: #fbfdff !important;
+            background: #f8fafc !important;
             color: #172033 !important;
-            border: 1px solid #bdd3ef !important;
+            border: 1px solid #aebfd4 !important;
             border-radius: 14px !important;
         }
 
@@ -204,7 +215,7 @@ def apply_custom_css():
             border-radius: 14px !important;
             padding: 0.65rem 1rem !important;
             font-weight: 750 !important;
-            box-shadow: 0 10px 22px rgba(14, 165, 233, 0.22);
+            box-shadow: 0 8px 18px rgba(14, 165, 233, 0.18);
             transition: all 0.18s ease-in-out;
         }
 
@@ -212,7 +223,7 @@ def apply_custom_css():
             background: linear-gradient(135deg, #1d4ed8 0%, #0284c7 100%) !important;
             color: white !important;
             transform: translateY(-1px);
-            box-shadow: 0 12px 26px rgba(14, 165, 233, 0.28);
+            box-shadow: 0 10px 22px rgba(14, 165, 233, 0.24);
         }
 
         .stDownloadButton button {
@@ -224,15 +235,15 @@ def apply_custom_css():
         }
 
         [data-testid="stFileUploader"] {
-            background: linear-gradient(135deg, #fbfdff 0%, #f2f8ff 100%);
-            border: 1px dashed #93c5fd;
+            background: linear-gradient(135deg, #f6f9fc 0%, #edf4fb 100%);
+            border: 1px dashed #8cb9e8;
             border-radius: 18px;
             padding: 0.8rem;
         }
 
         [data-testid="stFileUploader"] section {
-            background: #ffffff !important;
-            border: 1px solid #dbeafe !important;
+            background: #f8fafc !important;
+            border: 1px solid #cbdcf0 !important;
             border-radius: 15px !important;
         }
 
@@ -253,7 +264,7 @@ def apply_custom_css():
         }
 
         hr {
-            border-color: #dbeafe;
+            border-color: #cfdced;
             margin-top: 1rem;
             margin-bottom: 1.4rem;
         }
@@ -277,63 +288,170 @@ def apply_custom_css():
         unsafe_allow_html=True
     )
 
-def extract_text_from_pdfs(pdf_docs):
-    text = ""
+
+def build_source_label(metadata: Dict) -> str:
+    file_name = metadata.get("file_name", "Unknown file")
+    file_type = metadata.get("file_type", "Unknown")
+    page = metadata.get("page")
+    chunk = metadata.get("chunk")
+
+    if page:
+        return f"{file_name} | {file_type} | Page {page}"
+
+    return f"{file_name} | {file_type} | Chunk {chunk}"
+
+
+def show_sources(docs: List[LCDocument], title: str = "Sources"):
+    if not docs:
+        return
+
+    st.markdown(f"### 🔎 {title}")
+
+    seen = set()
+    unique_docs = []
+
+    for doc in docs:
+        label = build_source_label(doc.metadata)
+        if label not in seen:
+            seen.add(label)
+            unique_docs.append(doc)
+
+    for i, doc in enumerate(unique_docs, start=1):
+        label = build_source_label(doc.metadata)
+        preview = doc.page_content[:900].strip()
+
+        st.markdown(
+            f"""
+            <div class="source-card">
+                <b>{i}. {label}</b>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        with st.expander(f"View source preview {i}", expanded=False):
+            st.write(preview)
+
+
+def get_embeddings():
+    return GoogleGenerativeAIEmbeddings(
+        model="models/gemini-embedding-001",
+        google_api_key=api_key
+    )
+    
+    
+def split_text_with_metadata(
+    text: str,
+    base_metadata: Dict
+) -> List[LCDocument]:
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=5000,
+        chunk_overlap=500
+    )
+
+    chunks = splitter.split_text(text)
+    documents = []
+
+    for index, chunk in enumerate(chunks, start=1):
+        metadata = base_metadata.copy()
+        metadata["chunk"] = index
+
+        documents.append(
+            LCDocument(
+                page_content=chunk,
+                metadata=metadata
+            )
+        )
+
+    return documents
+
+
+def extract_documents_from_pdfs(pdf_docs) -> List[LCDocument]:
+    documents = []
 
     for pdf in pdf_docs:
         try:
             pdf.seek(0)
             reader = PdfReader(pdf)
 
-            normal_text = ""
-            for page in reader.pages:
-                normal_text += page.extract_text() or ""
+            has_normal_text = False
 
-            if normal_text.strip():
-                text += f"\n\n--- PDF: {pdf.name} ---\n"
-                text += normal_text
-            else:
+            for page_index, page in enumerate(reader.pages, start=1):
+                page_text = page.extract_text() or ""
+
+                if page_text.strip():
+                    has_normal_text = True
+
+                    docs = split_text_with_metadata(
+                        page_text,
+                        {
+                            "file_name": pdf.name,
+                            "file_type": "PDF",
+                            "page": page_index
+                        }
+                    )
+
+                    documents.extend(docs)
+
+            if not has_normal_text:
                 pdf.seek(0)
                 images = convert_from_bytes(pdf.read())
 
-                scanned_text = ""
-                for image in images:
-                    scanned_text += pytesseract.image_to_string(image) + "\n"
+                for page_index, image in enumerate(images, start=1):
+                    scanned_text = pytesseract.image_to_string(image)
 
-                text += f"\n\n--- Scanned PDF OCR: {pdf.name} ---\n"
-                text += scanned_text
+                    if scanned_text.strip():
+                        docs = split_text_with_metadata(
+                            scanned_text,
+                            {
+                                "file_name": pdf.name,
+                                "file_type": "Scanned PDF OCR",
+                                "page": page_index
+                            }
+                        )
+
+                        documents.extend(docs)
 
         except Exception as e:
             st.error(f"Error extracting PDF text from {pdf.name}: {e}")
 
-    return text
+    return documents
 
 
-def extract_text_from_images(image_docs):
-    text = ""
+def extract_documents_from_images(image_docs) -> List[LCDocument]:
+    documents = []
 
     for image_file in image_docs:
         try:
             image = Image.open(image_file)
             image_text = pytesseract.image_to_string(image)
 
-            text += f"\n\n--- Image OCR: {image_file.name} ---\n"
-            text += image_text
+            if image_text.strip():
+                docs = split_text_with_metadata(
+                    image_text,
+                    {
+                        "file_name": image_file.name,
+                        "file_type": "Image OCR"
+                    }
+                )
+
+                documents.extend(docs)
 
         except Exception as e:
             st.error(f"Error extracting image text from {image_file.name}: {e}")
 
-    return text
+    return documents
 
 
-def extract_text_from_docx(docx_docs):
-    text = ""
+def extract_documents_from_docx(docx_docs) -> List[LCDocument]:
+    documents = []
 
     for docx_file in docx_docs:
         try:
             document = Document(docx_file)
 
             docx_text = ""
+
             for para in document.paragraphs:
                 if para.text.strip():
                     docx_text += para.text + "\n"
@@ -341,35 +459,38 @@ def extract_text_from_docx(docx_docs):
             for table in document.tables:
                 for row in table.rows:
                     row_text = []
+
                     for cell in row.cells:
                         row_text.append(cell.text.strip())
+
                     docx_text += " | ".join(row_text) + "\n"
 
-            text += f"\n\n--- DOCX: {docx_file.name} ---\n"
-            text += docx_text
+            if docx_text.strip():
+                docs = split_text_with_metadata(
+                    docx_text,
+                    {
+                        "file_name": docx_file.name,
+                        "file_type": "DOCX"
+                    }
+                )
+
+                documents.extend(docs)
 
         except Exception as e:
             st.error(f"Error extracting DOCX text from {docx_file.name}: {e}")
 
-    return text
+    return documents
 
 
-def split_text_into_chunks(text):
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=8000,
-        chunk_overlap=800
-    )
-    return splitter.split_text(text)
-
-
-def create_faiss_vector_store(text_chunks):
+def create_faiss_vector_store(documents: List[LCDocument]):
     try:
-        embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/gemini-embedding-001",
-            google_api_key=api_key
+        embeddings = get_embeddings()
+
+        vector_store = FAISS.from_documents(
+            documents,
+            embedding=embeddings
         )
 
-        vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
         vector_store.save_local(FAISS_INDEX_PATH)
 
         return vector_store
@@ -381,10 +502,7 @@ def create_faiss_vector_store(text_chunks):
 
 def load_faiss_vector_store():
     try:
-        embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/gemini-embedding-001",
-            google_api_key=api_key
-        )
+        embeddings = get_embeddings()
 
         return FAISS.load_local(
             FAISS_INDEX_PATH,
@@ -397,13 +515,30 @@ def load_faiss_vector_store():
         return None
 
 
+def search_documents(query: str, k: int = 5) -> List[LCDocument]:
+    vector_store = load_faiss_vector_store()
+
+    if not vector_store:
+        return []
+
+    return vector_store.similarity_search(
+        query,
+        k=k
+    )
+    
 def initialize_qa_chain():
     prompt_template = """
 You are a helpful document assistant.
 
-Answer the user's question using only the context below.
-If the answer is not available in the context, say:
-"I could not find this information in the uploaded document."
+Answer the user's question using only the provided context.
+
+Rules:
+- Be clear and direct.
+- Do not invent information.
+- If the answer is not available in the context, say:
+  "I could not find this information in the uploaded document."
+- Do not mention source file names inside the answer unless the context clearly requires it.
+- The app will show source citations separately below your answer.
 
 Context:
 {context}
@@ -425,29 +560,18 @@ Answer:
         input_variables=["context", "question"]
     )
 
-    return load_qa_chain(model, chain_type="stuff", prompt=prompt)
+    return load_qa_chain(
+        model,
+        chain_type="stuff",
+        prompt=prompt
+    )
 
 
-def summarize_documents(user_instruction, topic=None, summary_length="short"):
-    vector_store = load_faiss_vector_store()
-
-    if not vector_store:
-        return ""
-
-    query = user_instruction
-    if topic:
-        query += " " + topic
-
-    docs = vector_store.similarity_search(query, k=5)
-
-    length_mapping = {
-        "short": "Write a short summary with only the most important points.",
-        "medium": "Write a medium-length summary with key points and useful details.",
-        "long": "Write a detailed summary with important explanations and structure."
-    }
-
+def initialize_summary_chain():
     prompt_template = """
 You are a document summarization assistant.
+
+Use only the provided context.
 
 Instruction:
 {instruction}
@@ -455,56 +579,102 @@ Instruction:
 Summary Length:
 {summary_length_instruction}
 
+Rules:
+- Summarize clearly.
+- Do not invent information.
+- Keep the result useful and structured.
+- The app will show source citations separately below the summary.
+
 Context:
 {context}
 
 Write the summary:
 """
 
+    model = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        temperature=0.3,
+        google_api_key=api_key
+    )
+
+    prompt = PromptTemplate(
+        template=prompt_template,
+        input_variables=[
+            "context",
+            "instruction",
+            "summary_length_instruction"
+        ]
+    )
+
+    return load_qa_chain(
+        model,
+        chain_type="stuff",
+        prompt=prompt
+    )
+
+
+def summarize_documents(
+    user_instruction,
+    topic=None,
+    summary_length="short"
+) -> Tuple[str, List[LCDocument]]:
+
+    query = user_instruction
+
+    if topic:
+        query += " " + topic
+
+    docs = search_documents(query, k=6)
+
+    if not docs:
+        return "", []
+
+    length_mapping = {
+        "short":
+            "Write a short summary with only the most important points.",
+        "medium":
+            "Write a medium-length summary with key points and useful details.",
+        "long":
+            "Write a detailed summary with important explanations and structure."
+    }
+
     try:
-        model = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
-            temperature=0.3,
-            google_api_key=api_key
-        )
-
-        prompt = PromptTemplate(
-            template=prompt_template,
-            input_variables=["context", "instruction", "summary_length_instruction"]
-        )
-
-        chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
+        chain = initialize_summary_chain()
 
         response = chain(
             {
                 "input_documents": docs,
                 "instruction": user_instruction,
-                "summary_length_instruction": length_mapping.get(
-                    summary_length,
-                    length_mapping["short"]
-                )
+                "summary_length_instruction":
+                    length_mapping.get(
+                        summary_length,
+                        length_mapping["short"]
+                    )
             },
             return_only_outputs=True
         )
 
-        return response["output_text"]
+        return response["output_text"], docs
 
     except Exception as e:
         st.error(f"Error generating summary: {e}")
-        return ""
+        return "", docs
 
 
-def answer_user_question(user_question, topic=None):
-    vector_store = load_faiss_vector_store()
-
-    if not vector_store:
-        return ""
+def answer_user_question(
+    user_question,
+    topic=None
+) -> Tuple[str, List[LCDocument]]:
 
     query = user_question
+
     if topic:
         query += " " + topic
 
-    docs = vector_store.similarity_search(query, k=5)
+    docs = search_documents(query, k=6)
+
+    if not docs:
+        return "", []
 
     try:
         chain = initialize_qa_chain()
@@ -517,11 +687,11 @@ def answer_user_question(user_question, topic=None):
             return_only_outputs=True
         )
 
-        return response["output_text"]
+        return response["output_text"], docs
 
     except Exception as e:
         st.error(f"Error generating answer: {e}")
-        return ""
+        return "", docs
 
 
 def generate_pdf_summary(summary):
@@ -550,6 +720,7 @@ def reset_index():
     if os.path.exists(FAISS_INDEX_PATH):
         for file_name in os.listdir(FAISS_INDEX_PATH):
             os.remove(os.path.join(FAISS_INDEX_PATH, file_name))
+
         os.rmdir(FAISS_INDEX_PATH)
 
 
@@ -562,6 +733,7 @@ def get_file_type_counts(uploaded_files):
 
     for file in uploaded_files:
         name = file.name.lower()
+
         if name.endswith(".pdf"):
             counts["PDF"] += 1
         elif name.endswith((".jpg", ".jpeg", ".png")):
@@ -570,7 +742,6 @@ def get_file_type_counts(uploaded_files):
             counts["DOCX"] += 1
 
     return counts
-
 
 def main():
     st.set_page_config(
@@ -587,6 +758,7 @@ def main():
             <div class="main-title">📄 Document Summary Assistant</div>
             <div class="sub-title">
                 Chat with PDF, scanned PDF, image, and DOCX files using Gemini AI.
+                Answers now include source citations and preview chunks.
             </div>
         </div>
         """,
@@ -610,27 +782,47 @@ def main():
             counts = get_file_type_counts(uploaded_files)
 
             st.markdown("### 📊 Upload Summary")
+
             col_a, col_b, col_c = st.columns(3)
 
             with col_a:
                 st.markdown(
-                    f'<div class="metric-card"><div class="metric-number">{counts["PDF"]}</div><div class="metric-label">PDF</div></div>',
+                    f"""
+                    <div class="metric-card">
+                        <div class="metric-number">{counts["PDF"]}</div>
+                        <div class="metric-label">PDF</div>
+                    </div>
+                    """,
                     unsafe_allow_html=True
                 )
+
             with col_b:
                 st.markdown(
-                    f'<div class="metric-card"><div class="metric-number">{counts["Image"]}</div><div class="metric-label">Image</div></div>',
+                    f"""
+                    <div class="metric-card">
+                        <div class="metric-number">{counts["Image"]}</div>
+                        <div class="metric-label">Image</div>
+                    </div>
+                    """,
                     unsafe_allow_html=True
                 )
+
             with col_c:
                 st.markdown(
-                    f'<div class="metric-card"><div class="metric-number">{counts["DOCX"]}</div><div class="metric-label">DOCX</div></div>',
+                    f"""
+                    <div class="metric-card">
+                        <div class="metric-number">{counts["DOCX"]}</div>
+                        <div class="metric-label">DOCX</div>
+                    </div>
+                    """,
                     unsafe_allow_html=True
                 )
 
             st.markdown("### 📁 Selected Files")
+
             for file in uploaded_files:
                 size_kb = round(file.size / 1024, 2)
+
                 st.markdown(
                     f"""
                     <div class="file-card">
@@ -641,20 +833,34 @@ def main():
                     unsafe_allow_html=True
                 )
 
-        process_button = st.button("🚀 Process Files", use_container_width=True)
+        process_button = st.button(
+            "🚀 Process Files",
+            use_container_width=True
+        )
 
-        if st.button("🧹 Reset Saved Index", use_container_width=True):
+        if st.button(
+            "🧹 Reset Saved Index",
+            use_container_width=True
+        ):
             reset_index()
             st.success("Saved FAISS index removed.")
 
         if os.path.exists(FAISS_INDEX_PATH):
             st.markdown(
-                '<div class="status-box">✅ Vector index is ready. You can summarize or ask questions.</div>',
+                """
+                <div class="status-box">
+                    ✅ Vector index is ready. You can summarize or ask questions.
+                </div>
+                """,
                 unsafe_allow_html=True
             )
         else:
             st.markdown(
-                '<div class="status-box">ℹ️ No active vector index. Upload and process files first.</div>',
+                """
+                <div class="status-box">
+                    ℹ️ No active vector index. Upload and process files first.
+                </div>
+                """,
                 unsafe_allow_html=True
             )
 
@@ -662,6 +868,7 @@ def main():
         file_names = [file.name for file in uploaded_files]
 
         st.markdown("### 🧾 File Selection")
+
         selected_files = st.multiselect(
             "Choose which files to process",
             options=file_names,
@@ -686,44 +893,42 @@ def main():
                 progress_bar.progress(15)
 
                 pdf_files = [
-                    f for f in selected_uploaded_files
-                    if f.type == "application/pdf" or f.name.lower().endswith(".pdf")
+                    file for file in selected_uploaded_files
+                    if file.type == "application/pdf"
+                    or file.name.lower().endswith(".pdf")
                 ]
 
                 image_files = [
-                    f for f in selected_uploaded_files
-                    if f.type.startswith("image/")
+                    file for file in selected_uploaded_files
+                    if file.type.startswith("image/")
                 ]
 
                 docx_files = [
-                    f for f in selected_uploaded_files
-                    if f.name.lower().endswith(".docx")
+                    file for file in selected_uploaded_files
+                    if file.name.lower().endswith(".docx")
                 ]
 
-                status_area.info("Step 2/4: Extracting text from files...")
+                status_area.info("Step 2/4: Extracting text with metadata...")
                 progress_bar.progress(40)
 
-                pdf_text = extract_text_from_pdfs(pdf_files)
-                image_text = extract_text_from_images(image_files)
-                docx_text = extract_text_from_docx(docx_files)
+                documents = []
+                documents.extend(extract_documents_from_pdfs(pdf_files))
+                documents.extend(extract_documents_from_images(image_files))
+                documents.extend(extract_documents_from_docx(docx_files))
 
-                combined_text = pdf_text + "\n" + image_text + "\n" + docx_text
-
-                if combined_text.strip():
-                    status_area.info("Step 3/4: Splitting text into chunks...")
+                if documents:
+                    status_area.info("Step 3/4: Preparing chunks and source metadata...")
                     progress_bar.progress(65)
-
-                    text_chunks = split_text_into_chunks(combined_text)
 
                     status_area.info("Step 4/4: Creating FAISS vector index...")
                     progress_bar.progress(85)
 
-                    vector_store = create_faiss_vector_store(text_chunks)
+                    vector_store = create_faiss_vector_store(documents)
 
                     if vector_store:
                         progress_bar.progress(100)
                         status_area.success(
-                            f"Files processed successfully. Created {len(text_chunks)} text chunks."
+                            f"Files processed successfully. Created {len(documents)} indexed chunks with sources."
                         )
                     else:
                         status_area.error(
@@ -742,23 +947,28 @@ def main():
                 "Topic optional",
                 placeholder="Example: security, introduction, conclusion"
             )
+
             user_instruction = st.text_input(
                 "Summary instruction",
                 value="Create a clear summary"
             )
+
             summary_length = st.selectbox(
                 "Summary length",
                 ["short", "medium", "long"]
             )
 
-            if st.button("✍️ Generate Summary", use_container_width=True):
+            if st.button(
+                "✍️ Generate Summary",
+                use_container_width=True
+            ):
                 if not os.path.exists(FAISS_INDEX_PATH):
                     st.warning("Please process files first.")
                 elif not user_instruction.strip():
                     st.warning("Please enter summary instruction.")
                 else:
-                    with st.spinner("Generating summary..."):
-                        summary = summarize_documents(
+                    with st.spinner("Generating summary with source tracking..."):
+                        summary, source_docs = summarize_documents(
                             user_instruction=user_instruction,
                             topic=user_topic,
                             summary_length=summary_length
@@ -768,6 +978,7 @@ def main():
                             st.success("Summary generated")
                             st.write(summary)
                             download_pdf(summary)
+                            show_sources(source_docs, title="Summary Sources")
 
     with col2:
         with st.expander("💬 Ask Questions", expanded=True):
@@ -775,20 +986,24 @@ def main():
                 "Question topic optional",
                 placeholder="Example: eligibility, cost, features"
             )
+
             user_question = st.text_area(
                 "Your question",
                 placeholder="Ask anything from the uploaded document...",
                 height=120
             )
 
-            if st.button("🔍 Get Answer", use_container_width=True):
+            if st.button(
+                "🔍 Get Answer",
+                use_container_width=True
+            ):
                 if not os.path.exists(FAISS_INDEX_PATH):
                     st.warning("Please process files first.")
                 elif not user_question.strip():
                     st.warning("Please enter a question.")
                 else:
-                    with st.spinner("Finding answer..."):
-                        answer = answer_user_question(
+                    with st.spinner("Finding answer with source tracking..."):
+                        answer, source_docs = answer_user_question(
                             user_question=user_question,
                             topic=user_topic_for_question
                         )
@@ -796,6 +1011,7 @@ def main():
                         if answer:
                             st.success("Answer found")
                             st.write(answer)
+                            show_sources(source_docs, title="Answer Sources")
 
 
 if __name__ == "__main__":
