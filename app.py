@@ -45,6 +45,9 @@ COLLECTIONS_DIR = "collections"
 DEFAULT_COLLECTION = "default"
 DOCUMENTS_JSON = "documents.json"
 
+SEARCH_CURRENT_COLLECTION = "Current Collection"
+SEARCH_ALL_COLLECTIONS = "All Collections"
+
 
 def apply_custom_css():
     st.markdown(
@@ -167,6 +170,17 @@ def apply_custom_css():
             border-radius: 999px;
             background: #dbeafe;
             color: #1e3a8a;
+            font-size: 0.78rem;
+            font-weight: 800;
+            margin-left: 0.4rem;
+        }
+
+        .collection-pill {
+            display: inline-block;
+            padding: 0.18rem 0.55rem;
+            border-radius: 999px;
+            background: #dcfce7;
+            color: #166534;
             font-size: 0.78rem;
             font-weight: 800;
             margin-left: 0.4rem;
@@ -585,18 +599,17 @@ def save_chat_message(
     collection_name: str,
     question: str,
     answer: str,
-    source_docs
+    source_docs: List[LCDocument],
+    search_mode: str
 ):
-
-    history = get_chat_history(
-        collection_name
-    )
+    history = get_chat_history(collection_name)
 
     history.append(
         {
             "question": question,
             "answer": answer,
-            "sources": source_docs
+            "sources": source_docs,
+            "search_mode": search_mode
         }
     )
 
@@ -646,42 +659,26 @@ def build_source_label(
     )
 
 
-def build_chat_history_text(
-    collection_name: str
-):
-
-    history = get_chat_history(
-        collection_name
-    )
-
+def build_chat_history_text(collection_name: str):
+    history = get_chat_history(collection_name)
     lines = []
 
-    for index, item in enumerate(
-        history,
-        start=1
-    ):
-
-        lines.append(
-            f"Q{index}: {item['question']}"
-        )
-
-        lines.append(
-            f"A{index}: {item['answer']}"
-        )
-
+    for index, item in enumerate(history, start=1):
+        lines.append(f"Q{index}: {item['question']}")
+        lines.append(f"Search Mode: {item.get('search_mode', SEARCH_CURRENT_COLLECTION)}")
+        lines.append(f"A{index}: {item['answer']}")
         lines.append("Sources:")
 
         seen = set()
 
         for doc in item["sources"]:
+            source_collection = doc.metadata.get("collection", collection_name)
+            label = build_source_label(doc.metadata)
+            full_label = f"{source_collection} | {label}"
 
-            label = build_source_label(
-                doc.metadata
-            )
-
-            if label not in seen:
-                seen.add(label)
-                lines.append(f"- {label}")
+            if full_label not in seen:
+                seen.add(full_label)
+                lines.append(f"- {full_label}")
 
         lines.append("")
 
@@ -1337,12 +1334,15 @@ def hybrid_search_documents(
     return ranked[:k]
 
 
-def search_documents(
-    collection_name: str,
-    query: str,
-    k: int = 6
-) -> List[LCDocument]:
+def get_searchable_collections():
+    return [
+        collection
+        for collection in list_collections()
+        if collection_has_index(collection) and collection_has_documents_json(collection)
+    ]
 
+
+def search_single_collection(collection_name: str, query: str, k: int = 8):
     return hybrid_search_documents(
         collection_name=collection_name,
         query=query,
@@ -1350,67 +1350,126 @@ def search_documents(
     )
 
 
-def show_sources(
-    docs: List[LCDocument],
-    title: str = "Sources"
-):
+def search_all_collections(query: str, k: int = 10):
+    all_results = []
 
+    for collection_name in get_searchable_collections():
+        try:
+            all_results.extend(
+                search_single_collection(
+                    collection_name=collection_name,
+                    query=query,
+                    k=k
+                )
+            )
+        except Exception as e:
+            st.warning(f"Search skipped for {collection_name}: {e}")
+
+    all_results.sort(
+        key=lambda doc: doc.metadata.get("final_score", 0),
+        reverse=True
+    )
+
+    return all_results[:k]
+
+
+def search_documents(
+    collection_name: str,
+    query: str,
+    search_mode: str,
+    k: int = 8
+):
+    if search_mode == SEARCH_ALL_COLLECTIONS:
+        return search_all_collections(
+            query=query,
+            k=k
+        )
+
+    return search_single_collection(
+        collection_name=collection_name,
+        query=query,
+        k=k
+    )
+
+
+def get_total_collection_count():
+    return len(get_searchable_collections())
+
+
+def get_total_index_count():
+    total_chunks = 0
+
+    for collection_name in get_searchable_collections():
+        total_chunks += len(load_documents_json(collection_name))
+
+    return total_chunks
+
+
+def build_collection_summary():
+    return {
+        "collections": get_total_collection_count(),
+        "chunks": get_total_index_count()
+    }
+
+
+def render_search_mode_card(search_mode: str):
+    if search_mode == SEARCH_ALL_COLLECTIONS:
+        stats = build_collection_summary()
+
+        st.markdown(
+            f"""
+            <div class="collection-card">
+                🌎 Search Scope: <b>All Collections</b><br>
+                <span class="small-note">
+                Collections: {stats['collections']} |
+                Chunks: {stats['chunks']}
+                </span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    else:
+        st.markdown(
+            """
+            <div class="collection-card">
+                📁 Search Scope: <b>Current Collection</b>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+
+def show_sources(docs: List[LCDocument], title: str = "Sources"):
     if not docs:
         return
 
-    st.markdown(
-        f"### 🔎 {title}"
-    )
+    st.markdown(f"### 🔎 {title}")
 
     seen = set()
     unique_docs = []
 
     for doc in docs:
+        label = build_source_label(doc.metadata)
+        collection = doc.metadata.get("collection", "unknown")
+        full_label = f"{collection} | {label}"
 
-        label = build_source_label(
-            doc.metadata
-        )
+        if full_label not in seen:
+            seen.add(full_label)
+            unique_docs.append(doc)
 
-        if label not in seen:
-            seen.add(
-                label
-            )
-            unique_docs.append(
-                doc
-            )
-
-    for i, doc in enumerate(
-        unique_docs,
-        start=1
-    ):
-
-        label = build_source_label(
-            doc.metadata
-        )
-
-        final_score = doc.metadata.get(
-            "final_score",
-            0
-        )
-
-        vector_score = doc.metadata.get(
-            "vector_score",
-            0
-        )
-
-        keyword_score = doc.metadata.get(
-            "keyword_score",
-            0
-        )
-
-        preview = doc.page_content[
-            :900
-        ].strip()
+    for i, doc in enumerate(unique_docs, start=1):
+        label = build_source_label(doc.metadata)
+        collection = doc.metadata.get("collection", "unknown")
+        final_score = doc.metadata.get("final_score", 0)
+        vector_score = doc.metadata.get("vector_score", 0)
+        keyword_score = doc.metadata.get("keyword_score", 0)
+        preview = doc.page_content[:900].strip()
 
         st.markdown(
             f"""
             <div class="source-card">
                 <b>{i}. {label}</b>
+                <span class="collection-pill">{collection}</span>
                 <span class="score-pill">Score: {final_score}</span>
                 <br>
                 <span class="small-note">
@@ -1421,13 +1480,8 @@ def show_sources(
             unsafe_allow_html=True
         )
 
-        with st.expander(
-            f"View source preview {i}",
-            expanded=False
-        ):
-            st.write(
-                preview
-            )
+        with st.expander(f"View source preview {i}", expanded=False):
+            st.write(preview)
 def initialize_qa_chain():
 
     prompt_template = """
@@ -1524,46 +1578,42 @@ Write the summary:
 def summarize_documents(
     collection_name: str,
     user_instruction,
+    search_mode: str,
     topic=None,
     summary_length="short"
 ) -> Tuple[str, List[LCDocument]]:
-
     query = user_instruction
 
     if topic:
         query += " " + topic
 
     docs = search_documents(
-        collection_name,
-        query,
-        k=6
+        collection_name=collection_name,
+        query=query,
+        search_mode=search_mode,
+        k=8
     )
 
     if not docs:
         return "", []
 
     length_mapping = {
-        "short":
-            "Write a short summary with only the most important points.",
-        "medium":
-            "Write a medium-length summary with key points and useful details.",
-        "long":
-            "Write a detailed summary with important explanations and structure."
+        "short": "Write a short summary with only the most important points.",
+        "medium": "Write a medium-length summary with key points and useful details.",
+        "long": "Write a detailed summary with important explanations and structure."
     }
 
     try:
-
         chain = initialize_summary_chain()
 
         response = chain(
             {
                 "input_documents": docs,
                 "instruction": user_instruction,
-                "summary_length_instruction":
-                    length_mapping.get(
-                        summary_length,
-                        length_mapping["short"]
-                    )
+                "summary_length_instruction": length_mapping.get(
+                    summary_length,
+                    length_mapping["short"]
+                )
             },
             return_only_outputs=True
         )
@@ -1571,35 +1621,32 @@ def summarize_documents(
         return response["output_text"], docs
 
     except Exception as e:
-        st.error(
-            f"Error generating summary: {e}"
-        )
-
+        st.error(f"Error generating summary: {e}")
         return "", docs
 
 
 def answer_user_question(
     collection_name: str,
     user_question,
+    search_mode: str,
     topic=None
 ) -> Tuple[str, List[LCDocument]]:
-
     query = user_question
 
     if topic:
         query += " " + topic
 
     docs = search_documents(
-        collection_name,
-        query,
-        k=6
+        collection_name=collection_name,
+        query=query,
+        search_mode=search_mode,
+        k=8
     )
 
     if not docs:
         return "", []
 
     try:
-
         chain = initialize_qa_chain()
 
         response = chain(
@@ -1613,10 +1660,7 @@ def answer_user_question(
         return response["output_text"], docs
 
     except Exception as e:
-        st.error(
-            f"Error generating answer: {e}"
-        )
-
+        st.error(f"Error generating answer: {e}")
         return "", docs
 
 
@@ -1691,29 +1735,22 @@ def download_chat_history(
     )
 
 
-def render_chat_history(
-    collection_name: str
-):
-
-    history = get_chat_history(
-        collection_name
-    )
+def render_chat_history(collection_name: str):
+    history = get_chat_history(collection_name)
 
     if not history:
-        st.info(
-            "No chat yet. Ask a question after processing your selected collection."
-        )
+        st.info("No chat yet. Ask a question after processing your selected collection.")
         return
 
-    for index, item in enumerate(
-        history,
-        start=1
-    ):
+    for index, item in enumerate(history, start=1):
+        search_mode = item.get("search_mode", SEARCH_CURRENT_COLLECTION)
 
         st.markdown(
             f"""
             <div class="chat-user-card">
-                <div class="chat-label">You · Question {index}</div>
+                <div class="chat-label">
+                    You · Question {index} · {search_mode}
+                </div>
                 {item["question"]}
             </div>
             """,
@@ -1735,8 +1772,28 @@ def render_chat_history(
             title=f"Sources for Answer {index}"
         )
         
-def main():
 
+def get_file_type_counts(uploaded_files):
+    counts = {
+        "PDF": 0,
+        "Image": 0,
+        "DOCX": 0
+    }
+
+    for file in uploaded_files:
+        name = file.name.lower()
+
+        if name.endswith(".pdf"):
+            counts["PDF"] += 1
+        elif name.endswith((".jpg", ".jpeg", ".png")):
+            counts["Image"] += 1
+        elif name.endswith(".docx"):
+            counts["DOCX"] += 1
+
+    return counts
+
+
+def main():
     st.set_page_config(
         page_title="Document Summary Assistant",
         page_icon="📄",
@@ -1752,8 +1809,8 @@ def main():
         <div class="hero-card">
             <div class="main-title">📄 Document Summary Assistant</div>
             <div class="sub-title">
-                Hybrid search assistant for PDF, scanned PDF, image, and DOCX collections.
-                Uses vector + keyword retrieval with source citations and relevance scores.
+                Search one collection or all collections using hybrid vector + keyword retrieval,
+                source citations, relevance scores, and chat history.
             </div>
         </div>
         """,
@@ -1761,7 +1818,6 @@ def main():
     )
 
     with st.sidebar:
-
         st.markdown("## 🗂️ Document Library")
 
         new_collection_name = st.text_input(
@@ -1769,32 +1825,21 @@ def main():
             placeholder="Example: project_report"
         )
 
-        if st.button(
-            "➕ Create Collection",
-            use_container_width=True
-        ):
-            created_name = create_collection(
-                new_collection_name
-            )
+        if st.button("➕ Create Collection", use_container_width=True):
+            created_name = create_collection(new_collection_name)
 
             if created_name:
                 st.session_state.active_collection = created_name
-                st.success(
-                    f"Collection created: {created_name}"
-                )
+                st.success(f"Collection created: {created_name}")
             else:
-                st.warning(
-                    "Please enter a valid collection name."
-                )
+                st.warning("Please enter a valid collection name.")
 
         collections = list_collections()
 
         selected_collection = st.selectbox(
             "Active collection",
             options=collections,
-            index=collections.index(
-                st.session_state.active_collection
-            )
+            index=collections.index(st.session_state.active_collection)
             if st.session_state.active_collection in collections
             else 0
         )
@@ -1802,12 +1847,21 @@ def main():
         st.session_state.active_collection = selected_collection
         active_collection = st.session_state.active_collection
 
+        search_mode = st.radio(
+            "Search mode",
+            options=[
+                SEARCH_CURRENT_COLLECTION,
+                SEARCH_ALL_COLLECTIONS
+            ],
+            horizontal=False
+        )
+
         st.markdown(
             f"""
             <div class="collection-card">
                 📁 Active Collection:<br>
                 <b>{active_collection}</b><br>
-                <span class="small-note">Hybrid Search: Vector + Keyword</span>
+                <span class="small-note">Mode: {search_mode}</span>
             </div>
             """,
             unsafe_allow_html=True
@@ -1823,23 +1877,13 @@ def main():
         uploaded_files = st.file_uploader(
             "Upload your files",
             accept_multiple_files=True,
-            type=[
-                "pdf",
-                "jpg",
-                "jpeg",
-                "png",
-                "docx"
-            ]
+            type=["pdf", "jpg", "jpeg", "png", "docx"]
         )
 
         if uploaded_files:
-
-            counts = get_file_type_counts(
-                uploaded_files
-            )
+            counts = get_file_type_counts(uploaded_files)
 
             st.markdown("### 📊 Upload Summary")
-
             col_a, col_b, col_c = st.columns(3)
 
             with col_a:
@@ -1878,11 +1922,7 @@ def main():
             st.markdown("### 📁 Selected Files")
 
             for file in uploaded_files:
-
-                size_kb = round(
-                    file.size / 1024,
-                    2
-                )
+                size_kb = round(file.size / 1024, 2)
 
                 st.markdown(
                     f"""
@@ -1899,67 +1939,32 @@ def main():
             use_container_width=True
         )
 
-        if st.button(
-            "🧹 Reset Selected Collection Index",
-            use_container_width=True
-        ):
-            reset_collection_index(
-                active_collection
-            )
-
-            clear_chat_history(
-                active_collection
-            )
-
-            st.success(
-                f"Index and chat reset for: {active_collection}"
-            )
+        if st.button("🧹 Reset Selected Collection Index", use_container_width=True):
+            reset_collection_index(active_collection)
+            clear_chat_history(active_collection)
+            st.success(f"Index and chat reset for: {active_collection}")
 
         if active_collection != DEFAULT_COLLECTION:
-
-            if st.button(
-                "🗑️ Delete Selected Collection",
-                use_container_width=True
-            ):
-                deleted = delete_collection(
-                    active_collection
-                )
+            if st.button("🗑️ Delete Selected Collection", use_container_width=True):
+                deleted = delete_collection(active_collection)
 
                 if deleted:
                     st.session_state.active_collection = DEFAULT_COLLECTION
-                    st.success(
-                        "Collection deleted."
-                    )
+                    st.success("Collection deleted.")
                 else:
-                    st.warning(
-                        "Default collection cannot be deleted."
-                    )
+                    st.warning("Default collection cannot be deleted.")
 
-        if st.button(
-            "💬 Clear Collection Chat",
-            use_container_width=True
-        ):
-            clear_chat_history(
-                active_collection
-            )
+        if st.button("💬 Clear Collection Chat", use_container_width=True):
+            clear_chat_history(active_collection)
+            st.success("Chat history cleared for this collection.")
 
-            st.success(
-                "Chat history cleared for this collection."
-            )
+        download_chat_history(active_collection)
 
-        download_chat_history(
-            active_collection
-        )
-
-        if collection_has_index(
-            active_collection
-        ) and collection_has_documents_json(
-            active_collection
-        ):
+        if collection_has_index(active_collection) and collection_has_documents_json(active_collection):
             st.markdown(
                 """
                 <div class="status-box">
-                    ✅ Collection is ready. Hybrid search is available.
+                    ✅ Active collection is ready.
                 </div>
                 """,
                 unsafe_allow_html=True
@@ -1968,18 +1973,28 @@ def main():
             st.markdown(
                 """
                 <div class="status-box">
-                    ℹ️ No searchable index for this collection. Upload and process files first.
+                    ℹ️ No searchable index for active collection. Upload and process files first.
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+        if search_mode == SEARCH_ALL_COLLECTIONS:
+            stats = build_collection_summary()
+
+            st.markdown(
+                f"""
+                <div class="status-box">
+                    🌎 All-collection search ready for:<br>
+                    Collections: <b>{stats["collections"]}</b><br>
+                    Indexed chunks: <b>{stats["chunks"]}</b>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
 
     if uploaded_files:
-
-        file_names = [
-            file.name
-            for file in uploaded_files
-        ]
+        file_names = [file.name for file in uploaded_files]
 
         st.markdown("### 🧾 File Selection")
 
@@ -1990,7 +2005,6 @@ def main():
         )
 
         if process_button:
-
             selected_uploaded_files = [
                 file
                 for file in uploaded_files
@@ -1998,28 +2012,20 @@ def main():
             ]
 
             if not selected_uploaded_files:
-                st.warning(
-                    "Please select at least one file."
-                )
+                st.warning("Please select at least one file.")
                 return
 
             progress_bar = st.progress(0)
             status_area = st.empty()
 
-            with st.spinner(
-                f"Processing files into collection: {active_collection}"
-            ):
-
-                status_area.info(
-                    "Step 1/5: Sorting uploaded files..."
-                )
+            with st.spinner(f"Processing files into collection: {active_collection}"):
+                status_area.info("Step 1/5: Sorting uploaded files...")
                 progress_bar.progress(12)
 
                 pdf_files = [
                     file
                     for file in selected_uploaded_files
-                    if file.type == "application/pdf"
-                    or file.name.lower().endswith(".pdf")
+                    if file.type == "application/pdf" or file.name.lower().endswith(".pdf")
                 ]
 
                 image_files = [
@@ -2034,46 +2040,21 @@ def main():
                     if file.name.lower().endswith(".docx")
                 ]
 
-                status_area.info(
-                    "Step 2/5: Extracting text with metadata..."
-                )
+                status_area.info("Step 2/5: Extracting text with metadata...")
                 progress_bar.progress(35)
 
                 documents = []
-
-                documents.extend(
-                    extract_documents_from_pdfs(
-                        pdf_files
-                    )
-                )
-
-                documents.extend(
-                    extract_documents_from_images(
-                        image_files
-                    )
-                )
-
-                documents.extend(
-                    extract_documents_from_docx(
-                        docx_files
-                    )
-                )
+                documents.extend(extract_documents_from_pdfs(pdf_files))
+                documents.extend(extract_documents_from_images(image_files))
+                documents.extend(extract_documents_from_docx(docx_files))
 
                 if documents:
-
-                    status_area.info(
-                        "Step 3/5: Saving chunks for keyword search..."
-                    )
+                    status_area.info("Step 3/5: Saving chunks for keyword search...")
                     progress_bar.progress(58)
 
-                    save_documents_json(
-                        active_collection,
-                        documents
-                    )
+                    save_documents_json(active_collection, documents)
 
-                    status_area.info(
-                        "Step 4/5: Creating vector index..."
-                    )
+                    status_area.info("Step 4/5: Creating vector index...")
                     progress_bar.progress(80)
 
                     vector_store = create_faiss_vector_store(
@@ -2082,49 +2063,35 @@ def main():
                     )
 
                     if vector_store:
-
                         progress_bar.progress(100)
-
                         status_area.success(
                             f"Collection '{active_collection}' updated with {len(documents)} chunks. Hybrid search is ready."
                         )
-
                     else:
-
                         status_area.error(
                             "Text was extracted, but vector index creation failed. Check your Google API key."
                         )
-
                 else:
-
-                    status_area.error(
-                        "No extractable text found."
-                    )
+                    status_area.error("No extractable text found.")
 
     st.divider()
+
+    render_search_mode_card(search_mode)
 
     st.markdown(
         f"""
         <div class="collection-card">
-            Working inside collection: <b>{st.session_state.active_collection}</b><br>
-            <span class="small-note">Search mode: Hybrid vector + keyword re-ranking</span>
+            Active collection: <b>{active_collection}</b><br>
+            <span class="small-note">Search mode: {search_mode}</span>
         </div>
         """,
         unsafe_allow_html=True
     )
 
-    col1, col2 = st.columns(
-        2,
-        gap="large"
-    )
+    col1, col2 = st.columns(2, gap="large")
 
     with col1:
-
-        with st.expander(
-            "📜 Summarize Collection",
-            expanded=True
-        ):
-
+        with st.expander("📜 Summarize Documents", expanded=True):
             user_topic = st.text_input(
                 "Topic optional",
                 placeholder="Example: security, introduction, conclusion"
@@ -2137,79 +2104,40 @@ def main():
 
             summary_length = st.selectbox(
                 "Summary length",
-                [
-                    "short",
-                    "medium",
-                    "long"
-                ]
+                ["short", "medium", "long"]
             )
 
-            if st.button(
-                "✍️ Generate Summary",
-                use_container_width=True
-            ):
+            if st.button("✍️ Generate Summary", use_container_width=True):
+                if search_mode == SEARCH_CURRENT_COLLECTION and not collection_has_index(active_collection):
+                    st.warning("Please process files into this collection first.")
 
-                if not collection_has_index(
-                    active_collection
-                ):
+                elif search_mode == SEARCH_CURRENT_COLLECTION and not collection_has_documents_json(active_collection):
+                    st.warning("Please reprocess this collection to enable hybrid search.")
 
-                    st.warning(
-                        "Please process files into this collection first."
-                    )
-
-                elif not collection_has_documents_json(
-                    active_collection
-                ):
-
-                    st.warning(
-                        "Please reprocess this collection to enable hybrid search."
-                    )
+                elif search_mode == SEARCH_ALL_COLLECTIONS and not get_searchable_collections():
+                    st.warning("No searchable collections found. Process files into at least one collection.")
 
                 elif not user_instruction.strip():
-
-                    st.warning(
-                        "Please enter summary instruction."
-                    )
+                    st.warning("Please enter summary instruction.")
 
                 else:
-
-                    with st.spinner(
-                        "Generating summary using hybrid search..."
-                    ):
-
+                    with st.spinner("Generating summary using selected search scope..."):
                         summary, source_docs = summarize_documents(
                             collection_name=active_collection,
                             user_instruction=user_instruction,
+                            search_mode=search_mode,
                             topic=user_topic,
                             summary_length=summary_length
                         )
 
                         if summary:
-
-                            st.success(
-                                "Summary generated"
-                            )
-
-                            st.write(
-                                summary
-                            )
-
-                            download_pdf(
-                                summary
-                            )
-
-                            show_sources(
-                                source_docs,
-                                title="Summary Sources"
-                            )
+                            st.success("Summary generated")
+                            st.write(summary)
+                            download_pdf(summary)
+                            show_sources(source_docs, title="Summary Sources")
 
     with col2:
-
-        with st.expander(
-            "💬 Ask Collection",
-            expanded=True
-        ):
-
+        with st.expander("💬 Ask Documents", expanded=True):
             user_topic_for_question = st.text_input(
                 "Question topic optional",
                 placeholder="Example: eligibility, cost, features"
@@ -2217,71 +2145,50 @@ def main():
 
             user_question = st.text_area(
                 "Your question",
-                placeholder="Ask anything from the active collection...",
+                placeholder="Ask anything from selected search scope...",
                 height=120
             )
 
-            if st.button(
-                "🔍 Ask and Save to Chat",
-                use_container_width=True
-            ):
+            if st.button("🔍 Ask and Save to Chat", use_container_width=True):
+                if search_mode == SEARCH_CURRENT_COLLECTION and not collection_has_index(active_collection):
+                    st.warning("Please process files into this collection first.")
 
-                if not collection_has_index(
-                    active_collection
-                ):
+                elif search_mode == SEARCH_CURRENT_COLLECTION and not collection_has_documents_json(active_collection):
+                    st.warning("Please reprocess this collection to enable hybrid search.")
 
-                    st.warning(
-                        "Please process files into this collection first."
-                    )
-
-                elif not collection_has_documents_json(
-                    active_collection
-                ):
-
-                    st.warning(
-                        "Please reprocess this collection to enable hybrid search."
-                    )
+                elif search_mode == SEARCH_ALL_COLLECTIONS and not get_searchable_collections():
+                    st.warning("No searchable collections found. Process files into at least one collection.")
 
                 elif not user_question.strip():
-
-                    st.warning(
-                        "Please enter a question."
-                    )
+                    st.warning("Please enter a question.")
 
                 else:
-
-                    with st.spinner(
-                        "Finding answer using hybrid search..."
-                    ):
-
+                    with st.spinner("Finding answer using selected search scope..."):
                         answer, source_docs = answer_user_question(
                             collection_name=active_collection,
                             user_question=user_question,
+                            search_mode=search_mode,
                             topic=user_topic_for_question
                         )
 
                         if answer:
-
                             save_chat_message(
                                 active_collection,
                                 user_question,
                                 answer,
-                                source_docs
+                                source_docs,
+                                search_mode
                             )
-
-                            st.success(
-                                "Answer saved to this collection chat history"
-                            )
+                            st.success("Answer saved to chat history")
 
     st.divider()
 
-    st.markdown(
-        f"## 💬 Chat History: `{active_collection}`"
-    )
+    st.markdown(f"## 💬 Chat History: `{active_collection}`")
+    render_chat_history(active_collection)
 
-    render_chat_history(
-        active_collection
-    )
+
+if __name__ == "__main__":
+    main()
 
 
 if __name__ == "__main__":
