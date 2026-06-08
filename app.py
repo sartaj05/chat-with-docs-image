@@ -2,7 +2,9 @@ import os
 import re
 import json
 import shutil
+import zipfile
 import platform
+from datetime import datetime
 from typing import List, Dict, Tuple
 
 import streamlit as st
@@ -42,6 +44,7 @@ if platform.system() == "Windows":
 
 
 COLLECTIONS_DIR = "collections"
+BACKUPS_DIR = "backups"
 DEFAULT_COLLECTION = "default"
 DOCUMENTS_JSON = "documents.json"
 
@@ -383,6 +386,10 @@ def ensure_collections_dir():
     )
 
 
+def ensure_backups_dir():
+    os.makedirs(BACKUPS_DIR, exist_ok=True)
+
+
 def get_collection_path(
     collection_name: str
 ) -> str:
@@ -576,6 +583,81 @@ def reset_collection_index(
     if os.path.exists(documents_file):
         os.remove(documents_file)
 
+
+
+def get_timestamp_label():
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def get_backup_file_name(prefix: str):
+    safe_prefix = sanitize_collection_name(prefix)
+    return f"{safe_prefix}_{get_timestamp_label()}.zip"
+
+
+def zip_folder(source_folder: str, output_zip_path: str):
+    with zipfile.ZipFile(output_zip_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for root, _, files in os.walk(source_folder):
+            for file_name in files:
+                file_path = os.path.join(root, file_name)
+                arc_name = os.path.relpath(file_path, source_folder)
+                zip_file.write(file_path, arc_name)
+    return output_zip_path
+
+
+def export_selected_collection(collection_name: str):
+    ensure_backups_dir()
+    collection_path = get_collection_path(collection_name)
+    if not os.path.exists(collection_path):
+        return None
+    output_name = get_backup_file_name(collection_name)
+    output_path = os.path.join(BACKUPS_DIR, output_name)
+    zip_folder(collection_path, output_path)
+    return output_path
+
+
+def export_all_collections():
+    ensure_backups_dir()
+    ensure_collections_dir()
+    if not os.path.exists(COLLECTIONS_DIR):
+        return None
+    output_name = get_backup_file_name("all_collections_backup")
+    output_path = os.path.join(BACKUPS_DIR, output_name)
+    zip_folder(COLLECTIONS_DIR, output_path)
+    return output_path
+
+
+def import_collection_zip(uploaded_zip_file, collection_name: str):
+    ensure_collections_dir()
+    collection_name = sanitize_collection_name(collection_name)
+    if not collection_name:
+        return False, "Please enter a valid collection name."
+    if not uploaded_zip_file.name.lower().endswith(".zip"):
+        return False, "Please upload a ZIP file."
+    target_path = get_collection_path(collection_name)
+    if os.path.exists(target_path):
+        shutil.rmtree(target_path)
+    os.makedirs(target_path, exist_ok=True)
+    try:
+        with zipfile.ZipFile(uploaded_zip_file, "r") as zip_ref:
+            zip_ref.extractall(target_path)
+        return True, f"Collection imported as: {collection_name}"
+    except Exception as e:
+        if os.path.exists(target_path):
+            shutil.rmtree(target_path)
+        return False, f"Import failed: {e}"
+
+
+def clear_all_collections():
+    if os.path.exists(COLLECTIONS_DIR):
+        shutil.rmtree(COLLECTIONS_DIR)
+    ensure_collections_dir()
+    st.session_state.chat_histories = {}
+    st.session_state.active_collection = DEFAULT_COLLECTION
+
+
+def read_file_as_bytes(file_path: str):
+    with open(file_path, "rb") as file:
+        return file.read()
 
 def get_chat_history(
     collection_name: str
@@ -1867,6 +1949,80 @@ def main():
             unsafe_allow_html=True
         )
 
+        st.markdown("## 💾 Local Backup")
+
+        st.markdown(
+            """
+            <div class="status-box">
+                🖥️ Mode: Local Private Workspace<br>
+                <span class="small-note">
+                    Data is stored only on this computer inside collections/.
+                </span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        selected_export_path = export_selected_collection(active_collection)
+
+        if selected_export_path:
+            st.download_button(
+                label="⬇️ Export Selected Collection",
+                data=read_file_as_bytes(selected_export_path),
+                file_name=os.path.basename(selected_export_path),
+                mime="application/zip",
+                use_container_width=True
+            )
+
+        all_export_path = export_all_collections()
+
+        if all_export_path:
+            st.download_button(
+                label="⬇️ Export All Collections",
+                data=read_file_as_bytes(all_export_path),
+                file_name=os.path.basename(all_export_path),
+                mime="application/zip",
+                use_container_width=True
+            )
+
+        with st.expander("📥 Import Collection ZIP", expanded=False):
+            import_name = st.text_input(
+                "Import as collection name",
+                placeholder="Example: imported_project"
+            )
+
+            import_zip = st.file_uploader(
+                "Upload collection ZIP",
+                type=["zip"],
+                key="collection_zip_import"
+            )
+
+            if st.button("📥 Import ZIP", use_container_width=True):
+                if import_zip is None:
+                    st.warning("Please upload a ZIP file.")
+                else:
+                    success, message = import_collection_zip(import_zip, import_name)
+                    if success:
+                        st.session_state.active_collection = sanitize_collection_name(import_name)
+                        st.success(message)
+                    else:
+                        st.error(message)
+
+        with st.expander("⚠️ Danger Zone", expanded=False):
+            st.warning("This removes all local collections from this computer.")
+
+            confirm_clear = st.text_input(
+                "Type CLEAR to confirm",
+                key="clear_all_confirm"
+            )
+
+            if st.button("🧨 Clear All Local Collections", use_container_width=True):
+                if confirm_clear == "CLEAR":
+                    clear_all_collections()
+                    st.success("All local collections cleared.")
+                else:
+                    st.error("Confirmation text did not match.")
+
         st.markdown("## 📂 Upload Center")
 
         st.markdown(
@@ -2186,9 +2342,6 @@ def main():
     st.markdown(f"## 💬 Chat History: `{active_collection}`")
     render_chat_history(active_collection)
 
-
-if __name__ == "__main__":
-    main()
 
 
 if __name__ == "__main__":
