@@ -1139,7 +1139,105 @@ def download_chat_history(collection_name: str):
         return
     chat_text = build_chat_history_text(collection_name)
     st.download_button(label="⬇️ Download Chat History", data=chat_text, file_name=f"{collection_name}_chat_history.txt", mime="text/plain")
+def build_sources_text(source_docs: List[LCDocument]):
+    if not source_docs:
+        return "No sources found."
 
+    lines = []
+    seen = set()
+
+    for index, doc in enumerate(source_docs, start=1):
+        metadata = doc.metadata
+        collection = metadata.get("collection", "unknown")
+        label = build_source_label(metadata)
+
+        full_label = f"{collection} | {label}"
+
+        if full_label in seen:
+            continue
+
+        seen.add(full_label)
+
+        final_score = metadata.get("final_score", 0)
+        vector_score = metadata.get("vector_score", 0)
+        keyword_score = metadata.get("keyword_score", 0)
+
+        lines.append(f"{index}. {full_label}")
+        lines.append(f"   Score: {final_score}")
+        lines.append(f"   Vector: {vector_score}")
+        lines.append(f"   Keyword: {keyword_score}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def build_answer_export_text(
+    title: str,
+    question_or_instruction: str,
+    answer: str,
+    source_docs: List[LCDocument]
+):
+    sources_text = build_sources_text(source_docs)
+
+    return f"""
+{title}
+
+Prompt:
+{question_or_instruction}
+
+Answer:
+{answer}
+
+Sources:
+{sources_text}
+""".strip()
+
+
+def render_result_actions(
+    result_key: str,
+    title: str,
+    prompt_text: str,
+    answer_text: str,
+    source_docs: List[LCDocument]
+):
+    if not answer_text:
+        return
+
+    export_text = build_answer_export_text(
+        title=title,
+        question_or_instruction=prompt_text,
+        answer=answer_text,
+        source_docs=source_docs
+    )
+
+    st.markdown("### ⚙️ Result Actions")
+
+    st.text_area(
+        "Copy-friendly answer",
+        value=answer_text,
+        height=180,
+        key=f"{result_key}_copy_box"
+    )
+
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        st.download_button(
+            label="⬇️ Download Answer TXT",
+            data=export_text,
+            file_name=f"{result_key}_answer.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
+
+    with col_b:
+        st.download_button(
+            label="⬇️ Download Sources TXT",
+            data=build_sources_text(source_docs),
+            file_name=f"{result_key}_sources.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
 def render_chat_history(collection_name: str):
     history = get_chat_history(collection_name)
 
@@ -1503,8 +1601,19 @@ def main():
                         )
                         if summary:
                             st.success("Summary generated")
+
                             st.write(summary)
+
                             download_pdf(summary)
+
+                            render_result_actions(
+                                result_key="summary",
+                                title="Document Summary",
+                                prompt_text=f"{user_instruction} {user_topic}",
+                                answer_text=summary,
+                                source_docs=source_docs
+                            )
+
                             show_sources(
                                 source_docs,
                                 title="Summary Sources",
@@ -1542,7 +1651,24 @@ def main():
                                 search_mode,
                                 source_query=f"{user_question} {user_topic_for_question}"
                             )
+
                             st.success("Answer saved to chat history")
+
+                            st.write(answer)
+
+                            render_result_actions(
+                                result_key="answer",
+                                title="Document Answer",
+                                prompt_text=f"{user_question} {user_topic_for_question}",
+                                answer_text=answer,
+                                source_docs=source_docs
+                            )
+
+                            show_sources(
+                                source_docs,
+                                title="Answer Sources",
+                                query=f"{user_question} {user_topic_for_question}"
+                            )
 
     st.divider()
     st.markdown(f"## 💬 Chat History: `{active_collection}`")
