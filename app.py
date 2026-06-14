@@ -6,7 +6,7 @@ import zipfile
 import platform
 from datetime import datetime
 from typing import List, Dict, Tuple
-
+from source_preview import render_source_preview
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
@@ -369,6 +369,44 @@ def apply_custom_css():
             .hero-card { padding: 1rem; }
             .block-container { padding-left: 1rem; padding-right: 1rem; }
         }
+        .highlight-preview {
+            background: #f8fafc;
+            border: 1px solid #cbdcf0;
+            border-radius: 14px;
+            padding: 1rem;
+            line-height: 1.7;
+            color: #172033;
+            font-size: 0.94rem;
+            white-space: pre-wrap;
+        }
+
+        .highlight-preview mark {
+            background: #fde68a;
+            color: #78350f;
+            padding: 0.08rem 0.22rem;
+            border-radius: 5px;
+            font-weight: 800;
+        }
+        /* Custom visible sidebar open hint */
+        .sidebar-open-helper {
+            position: fixed !important;
+            top: 16px !important;
+            left: 16px !important;
+            z-index: 99999999 !important;
+            width: 46px !important;
+            height: 46px !important;
+            border-radius: 16px !important;
+            background: linear-gradient(135deg, #1d4ed8, #0ea5e9) !important;
+            color: #ffffff !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            font-size: 28px !important;
+            font-weight: 900 !important;
+            box-shadow: 0 12px 30px rgba(37, 99, 235, 0.50) !important;
+            border: 2px solid #ffffff !important;
+            pointer-events: none !important;
+        }
         </style>
         """,
         unsafe_allow_html=True
@@ -542,9 +580,25 @@ def get_chat_history(collection_name: str):
     return st.session_state.chat_histories[collection_name]
 
 
-def save_chat_message(collection_name: str, question: str, answer: str, source_docs: List[LCDocument], search_mode: str):
+def save_chat_message(
+    collection_name: str,
+    question: str,
+    answer: str,
+    source_docs: List[LCDocument],
+    search_mode: str,
+    source_query: str = ""
+):
     history = get_chat_history(collection_name)
-    history.append({"question": question, "answer": answer, "sources": source_docs, "search_mode": search_mode})
+
+    history.append(
+        {
+            "question": question,
+            "answer": answer,
+            "sources": source_docs,
+            "search_mode": search_mode,
+            "source_query": source_query
+        }
+    )
 
 
 def clear_chat_history(collection_name: str):
@@ -918,7 +972,16 @@ def render_search_mode_card(search_mode: str):
         )
 
 
-def show_sources(docs: List[LCDocument], title: str = "Sources"):
+def show_sources(
+    docs: List[LCDocument],
+    title: str = "Sources",
+    query: str = ""
+):
+    render_source_preview(
+        docs=docs,
+        query=query,
+        title=title
+    )
     if not docs:
         return
     st.markdown(f"### 🔎 {title}")
@@ -1077,14 +1140,17 @@ def download_chat_history(collection_name: str):
     chat_text = build_chat_history_text(collection_name)
     st.download_button(label="⬇️ Download Chat History", data=chat_text, file_name=f"{collection_name}_chat_history.txt", mime="text/plain")
 
-
 def render_chat_history(collection_name: str):
     history = get_chat_history(collection_name)
+
     if not history:
         st.info("No chat yet. Ask a question after processing your selected collection.")
         return
+
     for index, item in enumerate(history, start=1):
         search_mode = item.get("search_mode", SEARCH_CURRENT_COLLECTION)
+        source_query = item.get("source_query", item.get("question", ""))
+
         st.markdown(
             f"""
             <div class="chat-user-card">
@@ -1096,6 +1162,7 @@ def render_chat_history(collection_name: str):
             """,
             unsafe_allow_html=True
         )
+
         st.markdown(
             f"""
             <div class="chat-ai-card">
@@ -1105,8 +1172,12 @@ def render_chat_history(collection_name: str):
             """,
             unsafe_allow_html=True
         )
-        show_sources(item["sources"], title=f"Sources for Answer {index}")
 
+        show_sources(
+            item["sources"],
+            title=f"Sources for Answer {index}",
+            query=source_query
+        )
 
 def get_file_type_counts(uploaded_files):
     counts = {"PDF": 0, "Image": 0, "DOCX": 0, "TXT": 0, "CSV": 0, "XLSX": 0, "PPTX": 0}
@@ -1133,6 +1204,12 @@ def main():
     st.set_page_config(page_title="Document Summary Assistant", page_icon="📄", layout="wide")
     initialize_session_state()
     apply_custom_css()
+    st.markdown(
+        """
+        <div class="sidebar-open-helper">»</div>
+        """,
+        unsafe_allow_html=True
+    )
     ensure_collections_dir()
     ensure_backups_dir()
 
@@ -1428,7 +1505,11 @@ def main():
                             st.success("Summary generated")
                             st.write(summary)
                             download_pdf(summary)
-                            show_sources(source_docs, title="Summary Sources")
+                            show_sources(
+                                source_docs,
+                                title="Summary Sources",
+                                query=f"{user_instruction} {user_topic}"
+                            )
 
     with col2:
         with st.expander("💬 Ask Documents", expanded=True):
@@ -1453,7 +1534,14 @@ def main():
                             topic=user_topic_for_question
                         )
                         if answer:
-                            save_chat_message(active_collection, user_question, answer, source_docs, search_mode)
+                            save_chat_message(
+                                active_collection,
+                                user_question,
+                                answer,
+                                source_docs,
+                                search_mode,
+                                source_query=f"{user_question} {user_topic_for_question}"
+                            )
                             st.success("Answer saved to chat history")
 
     st.divider()
