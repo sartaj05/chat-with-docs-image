@@ -28,7 +28,13 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
-
+from dashboard_memory_suggestions import (
+    render_collection_dashboard,
+    build_semantic_chat_context,
+    render_chat_memory_status,
+    generate_suggested_questions,
+    render_suggested_questions
+)
 
 load_dotenv()
 api_key = os.getenv("GOOGLE_API_KEY")
@@ -1019,19 +1025,24 @@ def show_sources(
             st.write(preview)
 
 
+
 def initialize_qa_chain():
     prompt_template = """
 You are a helpful document assistant.
 
-Answer the user's question using only the provided context.
+Answer the user's question using only the provided context and previous chat memory.
 
 Rules:
 - Be clear and direct.
+- Use previous chat memory only to understand follow-up questions.
 - Do not invent information.
 - If the answer is not available in the context, say:
   "I could not find this information in the uploaded document."
 - The app will show source citations separately below your answer.
 - The context was selected using hybrid search with vector and keyword ranking.
+
+Previous Chat Memory:
+{chat_memory}
 
 Context:
 {context}
@@ -1041,10 +1052,27 @@ Question:
 
 Answer:
 """
-    model = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.2, google_api_key=api_key)
-    prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-    return load_qa_chain(model, chain_type="stuff", prompt=prompt)
 
+    model = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        temperature=0.2,
+        google_api_key=api_key
+    )
+
+    prompt = PromptTemplate(
+        template=prompt_template,
+        input_variables=[
+            "chat_memory",
+            "context",
+            "question"
+        ]
+    )
+
+    return load_qa_chain(
+        model,
+        chain_type="stuff",
+        prompt=prompt
+    )
 
 def initialize_summary_chain():
     prompt_template = """
@@ -1102,22 +1130,50 @@ def summarize_documents(collection_name: str, user_instruction, search_mode: str
         st.error(f"Error generating summary: {e}")
         return "", docs
 
-
-def answer_user_question(collection_name: str, user_question, search_mode: str, topic=None) -> Tuple[str, List[LCDocument]]:
+def answer_user_question(
+    collection_name: str,
+    user_question,
+    search_mode: str,
+    topic=None
+) -> Tuple[str, List[LCDocument]]:
     query = user_question
+
     if topic:
         query += " " + topic
-    docs = search_documents(collection_name=collection_name, query=query, search_mode=search_mode, k=8)
+
+    docs = search_documents(
+        collection_name=collection_name,
+        query=query,
+        search_mode=search_mode,
+        k=8
+    )
+
     if not docs:
         return "", []
+
     try:
         chain = initialize_qa_chain()
-        response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
+
+        chat_history = get_chat_history(collection_name)
+        chat_memory = build_semantic_chat_context(
+            history=chat_history,
+            max_messages=5
+        )
+
+        response = chain(
+            {
+                "input_documents": docs,
+                "question": user_question,
+                "chat_memory": chat_memory
+            },
+            return_only_outputs=True
+        )
+
         return response["output_text"], docs
+
     except Exception as e:
         st.error(f"Error generating answer: {e}")
         return "", docs
-
 
 def generate_pdf_summary(summary):
     pdf = FPDF()
@@ -1310,7 +1366,11 @@ def main():
     )
     ensure_collections_dir()
     ensure_backups_dir()
-
+    with st.expander("📊 Collection Dashboard", expanded=False):
+        render_collection_dashboard(
+            collections_dir=COLLECTIONS_DIR,
+            documents_json=DOCUMENTS_JSON
+        )
     st.markdown(
         """
         <div class="hero-card">
@@ -1621,6 +1681,10 @@ def main():
                             )
 
     with col2:
+        render_chat_memory_status(
+            get_chat_history(active_collection),
+            max_messages=5
+        )
         with st.expander("💬 Ask Documents", expanded=True):
             user_topic_for_question = st.text_input("Question topic optional", placeholder="Example: eligibility, cost, features")
             user_question = st.text_area("Your question", placeholder="Ask anything from selected search scope...", height=120)
@@ -1669,6 +1733,20 @@ def main():
                                 title="Answer Sources",
                                 query=f"{user_question} {user_topic_for_question}"
                             )
+                            
+                            suggestion_model = ChatGoogleGenerativeAI(
+                                model="gemini-2.5-flash",
+                                temperature=0.4,
+                                google_api_key=api_key
+                            )
+
+                            suggested_questions = generate_suggested_questions(
+                                model=suggestion_model,
+                                answer=answer,
+                                source_docs=source_docs
+                            )
+
+                            render_suggested_questions(suggested_questions)
 
     st.divider()
     st.markdown(f"## 💬 Chat History: `{active_collection}`")
