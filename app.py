@@ -827,6 +827,19 @@ def build_source_label(metadata: Dict) -> str:
     return f"{file_name} | {file_type} | Chunk {chunk}"
 
 
+def prepare_citation_documents(source_docs: List[LCDocument]) -> List[LCDocument]:
+    citation_docs = []
+    for index, doc in enumerate(source_docs, start=1):
+        source_label = build_source_label(doc.metadata)
+        citation_docs.append(
+            LCDocument(
+                page_content=f"[{index}] {source_label}\n{doc.page_content}",
+                metadata=doc.metadata.copy()
+            )
+        )
+    return citation_docs
+
+
 def build_chat_history_text(collection_name: str):
     history = get_chat_history(collection_name)
     lines = []
@@ -1468,6 +1481,8 @@ Rules:
 - Be clear and direct.
 - Use previous chat memory only to understand follow-up questions.
 - Do not invent information.
+- Cite supporting context inline using the source number format [1], [2], etc.
+- Only cite source numbers that appear in the provided context.
 - If the answer is not available in the context, say:
   "I could not find this information in the uploaded document."
 - The app will show source citations separately below your answer.
@@ -1609,7 +1624,7 @@ def answer_user_question(
 
         response = chain(
             {
-                "input_documents": docs,
+                "input_documents": prepare_citation_documents(docs),
                 "question": user_question,
                 "chat_memory": chat_memory
             },
@@ -1647,10 +1662,13 @@ def stream_answer_user_question(
         history=get_chat_history(collection_name),
         max_messages=5
     )
-    context = "\n\n".join(doc.page_content for doc in docs)
+    context = "\n\n".join(
+        doc.page_content for doc in prepare_citation_documents(docs)
+    )
     prompt = f"""
 You are a helpful document assistant. Answer only from the provided context and previous chat memory.
 Do not invent information. If the answer is unavailable, say: "I could not find this information in the uploaded document."
+Add inline citations such as [1] or [2] for claims supported by the numbered context.
 
 Previous Chat Memory:
 {chat_memory}
