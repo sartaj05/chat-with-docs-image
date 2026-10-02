@@ -15,7 +15,7 @@ from source_preview import render_source_preview
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
-from PIL import Image
+from PIL import Image, ImageChops, ImageEnhance, ImageStat
 import pytesseract
 from PyPDF2 import PdfReader
 from docx import Document
@@ -1897,6 +1897,25 @@ def extract_comparison_visuals(uploaded_file, max_pages: int = 4):
     return []
 
 
+def build_visual_comparison(old_visuals, new_visuals):
+    comparisons = []
+    for page_index in range(max(len(old_visuals), len(new_visuals))):
+        if page_index >= len(old_visuals) or page_index >= len(new_visuals):
+            comparisons.append((page_index + 1, None, 100.0))
+            continue
+        old_image = old_visuals[page_index].convert("RGB")
+        new_image = new_visuals[page_index].convert("RGB")
+        width = max(old_image.width, new_image.width)
+        height = max(old_image.height, new_image.height)
+        old_image = old_image.resize((width, height), Image.Resampling.LANCZOS)
+        new_image = new_image.resize((width, height), Image.Resampling.LANCZOS)
+        difference = ImageChops.difference(old_image, new_image)
+        mean_difference = sum(ImageStat.Stat(difference).mean) / (255 * 3) * 100
+        visible_difference = ImageEnhance.Contrast(difference).enhance(4.0)
+        comparisons.append((page_index + 1, visible_difference, round(mean_difference, 2)))
+    return comparisons
+
+
 def extract_comparison_tables(uploaded_file) -> List[Tuple[str, pd.DataFrame]]:
     name = uploaded_file.name.lower()
     try:
@@ -2335,6 +2354,15 @@ def render_document_comparison():
                                 st.markdown("**Updated preview**")
                                 for image in new_visuals:
                                     st.image(image, use_container_width=True)
+                            visual_diffs = build_visual_comparison(old_visuals, new_visuals)
+                            st.markdown("#### Pixel Difference Map")
+                            st.caption("Bright areas indicate pixels that changed after page images were normalized to the same size.")
+                            for page_number, difference_image, score in visual_diffs:
+                                st.markdown(f"Page {page_number} · visual difference score: **{score}%**")
+                                if difference_image is None:
+                                    st.warning("This page exists in only one document.")
+                                else:
+                                    st.image(difference_image, use_container_width=True)
 
 def get_file_type_counts(uploaded_files):
     counts = {"PDF": 0, "Image": 0, "DOCX": 0, "TXT": 0, "CSV": 0, "XLSX": 0, "PPTX": 0}

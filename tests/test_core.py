@@ -1,6 +1,7 @@
 import importlib.util
 
 from langchain_core.documents import Document
+from PIL import Image
 
 import app
 
@@ -27,3 +28,12 @@ def test_citation_documents_keep_source_metadata():
 def test_optional_ai_dependencies_are_installed():
     assert importlib.util.find_spec("langchain_ollama") is not None
     assert importlib.util.find_spec("sentence_transformers") is not None
+
+
+def test_visual_comparison_detects_changed_pixels():
+    original = Image.new("RGB", (10, 10), "white")
+    updated = Image.new("RGB", (10, 10), "white")
+    updated.putpixel((5, 5), (0, 0, 0))
+    result = app.build_visual_comparison([original], [updated])
+    assert result[0][1] is not None
+    assert result[0][2] > 0
