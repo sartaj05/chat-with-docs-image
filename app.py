@@ -1117,7 +1117,9 @@ def get_collection_files(collection_name: str) -> List[Dict]:
                 "file_name": file_name,
                 "file_type": doc.metadata.get("file_type", "Unknown"),
                 "chunks": 0,
-                "preview": doc.page_content[:1800]
+                "preview": doc.page_content[:1800],
+                "ocr_confidence": doc.metadata.get("ocr_confidence"),
+                "ocr_table_rows": doc.metadata.get("ocr_table_rows", [])
             }
         files[file_name]["chunks"] += 1
     result = []
@@ -1200,36 +1202,66 @@ def split_text_with_metadata(text: str, base_metadata: Dict) -> List[LCDocument]
     return documents
 
 
-def layout_aware_ocr(image) -> str:
-    """Read OCR words in their detected block/paragraph/line order."""
+def layout_aware_ocr_details(image) -> Tuple[str, float, List[List[str]]]:
+    """Return ordered OCR text, mean confidence, and heuristic table rows."""
     try:
         data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
         grouped = {}
+        confidences = []
         for index, text in enumerate(data.get("text", [])):
             clean_text = str(text).strip()
             if not clean_text:
                 continue
+            try:
+                confidence = float(data["conf"][index])
+                if confidence >= 0:
+                    confidences.append(confidence)
+            except (KeyError, TypeError, ValueError):
+                pass
             key = (
                 int(data["block_num"][index]),
                 int(data["par_num"][index]),
                 int(data["line_num"][index])
             )
-            grouped.setdefault(key, []).append((int(data["left"][index]), clean_text))
+            grouped.setdefault(key, []).append({
+                "left": int(data["left"][index]),
+                "width": int(data["width"][index]),
+                "text": clean_text
+            })
         lines = []
+        table_rows = []
         for key in sorted(grouped):
-            words = " ".join(text for _, text in sorted(grouped[key]))
-            if words:
-                lines.append(words)
-        return "\n".join(lines)
+            words = sorted(grouped[key], key=lambda item: item["left"])
+            cells = [[words[0]["text"]]] if words else []
+            for word_index, word in enumerate(words[1:], start=1):
+                previous = words[word_index - 1]
+                gap = word["left"] - (previous["left"] + previous["width"])
+                if gap >= max(40, image.width * 0.04):
+                    cells.append([word["text"]])
+                else:
+                    cells[-1].append(word["text"])
+            row_cells = [" ".join(cell).strip() for cell in cells if " ".join(cell).strip()]
+            if len(row_cells) >= 2:
+                table_rows.append(row_cells)
+                lines.append(" | ".join(row_cells))
+            elif row_cells:
+                lines.append(row_cells[0])
+        mean_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+        return "\n".join(lines), round(mean_confidence, 2), table_rows
     except Exception:
-        return pytesseract.image_to_string(image)
+        return pytesseract.image_to_string(image), 0.0, []
 
 
-def extract_ocr_text(image) -> Tuple[str, bool]:
+def layout_aware_ocr(image) -> str:
+    return layout_aware_ocr_details(image)[0]
+
+
+def extract_ocr_text(image) -> Tuple[str, bool, float, List[List[str]]]:
     use_layout = st.session_state.get("layout_aware_ocr", False)
     if use_layout:
-        return layout_aware_ocr(image), True
-    return pytesseract.image_to_string(image), False
+        text, confidence, table_rows = layout_aware_ocr_details(image)
+        return text, True, confidence, table_rows
+    return pytesseract.image_to_string(image), False, 0.0, []
 
 
 def extract_documents_from_pdfs(pdf_docs) -> List[LCDocument]:
@@ -1251,13 +1283,15 @@ def extract_documents_from_pdfs(pdf_docs) -> List[LCDocument]:
                 for page_index, image in enumerate(images, start=1):
                     if page_index not in pages_needing_ocr:
                         continue
-                    scanned_text, used_layout_ocr = extract_ocr_text(image)
+                    scanned_text, used_layout_ocr, ocr_confidence, ocr_table_rows = extract_ocr_text(image)
                     if scanned_text.strip():
                         documents.extend(split_text_with_metadata(scanned_text, {
                             "file_name": pdf.name,
                             "file_type": "Scanned PDF OCR",
                             "page": page_index,
-                            "layout_ocr": used_layout_ocr
+                            "layout_ocr": used_layout_ocr,
+                            "ocr_confidence": ocr_confidence,
+                            "ocr_table_rows": ocr_table_rows
                         }))
         except Exception as e:
             st.error(f"Error extracting PDF text from {pdf.name}: {e}")
@@ -1269,12 +1303,14 @@ def extract_documents_from_images(image_docs) -> List[LCDocument]:
     for image_file in image_docs:
         try:
             image = Image.open(image_file)
-            image_text, used_layout_ocr = extract_ocr_text(image)
+            image_text, used_layout_ocr, ocr_confidence, ocr_table_rows = extract_ocr_text(image)
             if image_text.strip():
                 documents.extend(split_text_with_metadata(image_text, {
                     "file_name": image_file.name,
                     "file_type": "Image OCR",
-                    "layout_ocr": used_layout_ocr
+                    "layout_ocr": used_layout_ocr,
+                    "ocr_confidence": ocr_confidence,
+                    "ocr_table_rows": ocr_table_rows
                 }))
         except Exception as e:
             st.error(f"Error extracting image text from {image_file.name}: {e}")
@@ -2168,7 +2204,12 @@ def render_file_manager(collection_name: str):
         st.caption("Manage individual files without deleting the whole collection.")
         for index, item in enumerate(files):
             file_name = item["file_name"]
-            st.markdown(f"**{file_name}** · {item['file_type']} · {item['chunks']} chunks")
+            ocr_note = ""
+            if item.get("ocr_confidence"):
+                ocr_note = f" · OCR confidence {item['ocr_confidence']}%"
+            if item.get("ocr_table_rows"):
+                ocr_note += f" · {len(item['ocr_table_rows'])} table-like rows"
+            st.markdown(f"**{file_name}** · {item['file_type']} · {item['chunks']} chunks{ocr_note}")
             category_index = FILE_CATEGORIES.index(item["category"]) if item["category"] in FILE_CATEGORIES else 0
             category = st.selectbox(
                 "Category",
