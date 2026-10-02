@@ -8,6 +8,7 @@ import io
 import difflib
 import hashlib
 import secrets
+import sqlite3
 from datetime import datetime
 from typing import List, Dict, Tuple
 from source_preview import render_source_preview
@@ -70,6 +71,7 @@ COLLECTIONS_DIR = "collections"
 BACKUPS_DIR = "backups"
 WORKSPACES_DIR = "workspaces"
 USERS_FILE = "users.json"
+AUTH_DB = "auth.db"
 DEFAULT_COLLECTION = "default"
 DOCUMENTS_JSON = "documents.json"
 FILE_METADATA_JSON = "file_metadata.json"
@@ -484,19 +486,40 @@ def verify_password(password: str, stored_hash: str) -> bool:
         return False
 
 
+def initialize_auth_database():
+    with sqlite3.connect(AUTH_DB) as connection:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        if os.path.exists(USERS_FILE):
+            try:
+                with open(USERS_FILE, "r", encoding="utf-8") as file:
+                    legacy_users = json.load(file)
+                for username, details in legacy_users.items():
+                    connection.execute(
+                        "INSERT OR IGNORE INTO users(username, password_hash, created_at) VALUES (?, ?, ?)",
+                        (username, details.get("password_hash", ""), details.get("created_at", datetime.now().isoformat(timespec="seconds")))
+                    )
+                connection.commit()
+            except (OSError, json.JSONDecodeError):
+                pass
+
+
 def load_users() -> Dict:
-    if not os.path.exists(USERS_FILE):
-        return {}
-    try:
-        with open(USERS_FILE, "r", encoding="utf-8") as file:
-            return json.load(file)
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def save_users(users: Dict):
-    with open(USERS_FILE, "w", encoding="utf-8") as file:
-        json.dump(users, file, indent=2)
+    initialize_auth_database()
+    with sqlite3.connect(AUTH_DB) as connection:
+        rows = connection.execute("SELECT username, password_hash, created_at FROM users").fetchall()
+    return {
+        username: {"password_hash": password_hash, "created_at": created_at}
+        for username, password_hash, created_at in rows
+    }
 
 
 def migrate_legacy_collections(username: str):
@@ -518,24 +541,47 @@ def register_user(username: str, password: str) -> Tuple[bool, str]:
         return False, "Username must contain at least 3 letters or numbers."
     if len(password) < 6:
         return False, "Password must contain at least 6 characters."
-    users = load_users()
-    if username in users:
+    initialize_auth_database()
+    try:
+        with sqlite3.connect(AUTH_DB) as connection:
+            connection.execute(
+                "INSERT INTO users(username, password_hash, created_at) VALUES (?, ?, ?)",
+                (username, hash_password(password), datetime.now().isoformat(timespec="seconds"))
+            )
+            connection.commit()
+    except sqlite3.IntegrityError:
         return False, "That username already exists."
-    users[username] = {
-        "password_hash": hash_password(password),
-        "created_at": datetime.now().isoformat(timespec="seconds")
-    }
-    save_users(users)
     migrate_legacy_collections(username)
     return True, "Account created."
 
 
+def get_oidc_user() -> str:
+    try:
+        if hasattr(st, "user") and st.user.is_logged_in:
+            identity = getattr(st.user, "email", None) or getattr(st.user, "name", None) or getattr(st.user, "sub", None)
+            return sanitize_collection_name(str(identity)) if identity else ""
+    except Exception:
+        return ""
+    return ""
+
+
 def render_auth_gate() -> bool:
+    oidc_user = get_oidc_user()
+    if oidc_user:
+        st.session_state.authenticated_user = oidc_user
+        return True
     if st.session_state.get("authenticated_user"):
         return True
 
     st.markdown("## 🔐 Sign in to your workspace")
     st.caption("Each account receives an isolated local document workspace.")
+    if hasattr(st, "login"):
+        st.info("For production deployments, configure Streamlit OIDC in secrets.toml and use the OIDC sign-in button.")
+        if st.button("Sign in with configured OIDC", use_container_width=True):
+            try:
+                st.login(os.getenv("OIDC_PROVIDER", "google"))
+            except Exception as error:
+                st.error(f"OIDC sign-in is not configured: {error}")
     login_tab, register_tab = st.tabs(["Sign in", "Create account"])
 
     with login_tab:

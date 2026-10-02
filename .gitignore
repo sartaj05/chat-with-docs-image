@@ -7,5 +7,8 @@ backups/
 faiss_index/
 workspaces/
 users.json
+auth.db
+auth.db-shm
+auth.db-wal
 info.txt
 .streamlit/secrets.toml

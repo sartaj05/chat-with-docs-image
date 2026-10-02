@@ -30,4 +30,6 @@ Implemented feature areas:
 - Streaming answers with `st.write_stream`.
 - Local account registration, login, logout, isolated workspaces, and persisted chat history.
 
+Authentication uses SQLite with PBKDF2 password hashes. For production, configure Streamlit OIDC in `.streamlit/secrets.toml`; the app exposes an OIDC sign-in path when Streamlit authentication is configured.
+
 Generated local folders are ignored by Git: `collections/`, `backups/`, `faiss_index/`, `workspaces/`, and `users.json`.
