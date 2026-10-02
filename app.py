@@ -10,7 +10,7 @@ import hashlib
 import secrets
 import sqlite3
 from datetime import datetime
-from typing import List, Dict, Tuple
+from typing import Any, List, Dict, Tuple
 from source_preview import render_source_preview
 import pandas as pd
 import streamlit as st
@@ -24,13 +24,16 @@ from pdf2image import convert_from_bytes
 from fpdf import FPDF
 from rank_bm25 import BM25Okapi
 
-import google.generativeai as genai
+from google import genai
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document as LCDocument
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.embeddings import Embeddings
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from pydantic import PrivateAttr
 from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
 from dashboard_memory_suggestions import (
@@ -43,8 +46,6 @@ from dashboard_memory_suggestions import (
 
 load_dotenv()
 api_key = os.getenv("GOOGLE_API_KEY")
-if api_key:
-    genai.configure(api_key=api_key)
 
 try:
     from sentence_transformers import CrossEncoder
@@ -85,6 +86,68 @@ DEFAULT_OLLAMA_CHAT_MODEL = "llama3.2"
 DEFAULT_OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 FILE_CATEGORIES = ["Uncategorized", "Work", "Finance", "Legal", "Research", "Personal", "Other"]
+
+
+class GeminiEmbeddings(Embeddings):
+    """LangChain-compatible embeddings backed by the native google-genai SDK."""
+
+    def __init__(self, model: str, api_key: str):
+        self.model = model
+        self._client = genai.Client(api_key=api_key)
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        response = self._client.models.embed_content(model=self.model, contents=texts)
+        return [list(embedding.values) for embedding in response.embeddings]
+
+    def embed_query(self, text: str) -> List[float]:
+        response = self._client.models.embed_content(model=self.model, contents=text)
+        return list(response.embeddings[0].values)
+
+
+class GeminiChatModel(BaseChatModel):
+    """LangChain-compatible chat model backed by the native google-genai SDK."""
+
+    model: str = "gemini-2.5-flash"
+    temperature: float = 0.2
+    api_key: str
+    _client: Any = PrivateAttr()
+
+    def model_post_init(self, __context: Any) -> None:
+        self._client = genai.Client(api_key=self.api_key)
+
+    @property
+    def _llm_type(self) -> str:
+        return "google-genai"
+
+    @staticmethod
+    def _messages_to_prompt(messages: List[BaseMessage]) -> str:
+        parts = []
+        for message in messages:
+            role = getattr(message, "type", "message")
+            content = message.content
+            if isinstance(content, list):
+                content = " ".join(str(part) for part in content)
+            parts.append(f"{role}: {content}")
+        return "\n\n".join(parts)
+
+    def _generate(self, messages: List[BaseMessage], stop=None, run_manager=None, **kwargs: Any) -> ChatResult:
+        response = self._client.models.generate_content(
+            model=self.model,
+            contents=self._messages_to_prompt(messages),
+            config={"temperature": self.temperature}
+        )
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=response.text or ""))])
+
+    def _stream(self, messages: List[BaseMessage], stop=None, run_manager=None, **kwargs: Any):
+        stream = self._client.models.generate_content_stream(
+            model=self.model,
+            contents=self._messages_to_prompt(messages),
+            config={"temperature": self.temperature}
+        )
+        for response in stream:
+            text = getattr(response, "text", "") or ""
+            if text:
+                yield ChatGenerationChunk(message=AIMessageChunk(content=text))
 
 
 def apply_custom_css():
@@ -955,7 +1018,7 @@ def get_embeddings():
         )
     if not api_key:
         raise RuntimeError("GOOGLE_API_KEY is missing. Select Ollama Offline or configure Gemini.")
-    return GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", google_api_key=api_key)
+    return GeminiEmbeddings(model="gemini-embedding-001", api_key=api_key)
 
 
 def get_chat_model(temperature: float = 0.2):
@@ -968,10 +1031,10 @@ def get_chat_model(temperature: float = 0.2):
         )
     if not api_key:
         raise RuntimeError("GOOGLE_API_KEY is missing. Configure the key or select Ollama Offline.")
-    return ChatGoogleGenerativeAI(
+    return GeminiChatModel(
         model="gemini-2.5-flash",
         temperature=temperature,
-        google_api_key=api_key
+        api_key=api_key
     )
 
 
