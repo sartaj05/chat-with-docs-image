@@ -17,7 +17,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from PIL import Image, ImageChops, ImageEnhance, ImageStat
 import pytesseract
-from PyPDF2 import PdfReader
+from pypdf import PdfReader
 from docx import Document
 from pptx import Presentation
 from pdf2image import convert_from_bytes

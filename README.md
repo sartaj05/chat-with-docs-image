@@ -37,4 +37,6 @@ CI runs compilation and pytest through `.github/workflows/ci.yml`. A Docker-base
 
 External integration tests are opt-in: set `RUN_EXTERNAL_TESTS=1` with `GOOGLE_API_KEY` for Gemini, or set `RUN_OLLAMA_TESTS=1` with a running local Ollama service. Plain `pytest` skips these network-dependent tests.
 
+PDF extraction uses the maintained `pypdf` package.
+
 Generated local folders are ignored by Git: `collections/`, `backups/`, `faiss_index/`, `workspaces/`, and `users.json`.
