@@ -1,3 +1,5 @@
+import importlib.util
+
 from langchain_core.documents import Document
 
 import app
@@ -20,3 +22,8 @@ def test_citation_documents_keep_source_metadata():
     cited = app.prepare_citation_documents([source])[0]
     assert cited.page_content.startswith("[1] rules.txt | TXT | Chunk 1")
     assert cited.metadata["file_name"] == "rules.txt"
+
+
+def test_optional_ai_dependencies_are_installed():
+    assert importlib.util.find_spec("langchain_ollama") is not None
+    assert importlib.util.find_spec("sentence_transformers") is not None
