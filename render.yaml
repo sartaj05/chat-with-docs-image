@@ -8,3 +8,7 @@ services:
     envVars:
       - key: GOOGLE_API_KEY
         sync: false
+    disk:
+      name: chat-with-docs-data
+      mountPath: /app/data
+      sizeGB: 1

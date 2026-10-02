@@ -19,6 +19,10 @@ EXPOSE 8501
 
 # Define environment variable
 ENV STREAMLIT_SERVER_PORT=8501
+ENV APP_DATA_DIR=/app/data
+
+RUN mkdir -p /app/data
+VOLUME ["/app/data"]
 
 # Run Streamlit app when the container launches
 CMD ["streamlit", "run", "app.py"]

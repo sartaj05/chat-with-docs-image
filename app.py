@@ -68,11 +68,12 @@ if platform.system() == "Windows":
         pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
 
-COLLECTIONS_DIR = "collections"
-BACKUPS_DIR = "backups"
-WORKSPACES_DIR = "workspaces"
-USERS_FILE = "users.json"
-AUTH_DB = "auth.db"
+APP_DATA_DIR = os.getenv("APP_DATA_DIR", ".")
+COLLECTIONS_DIR = os.path.join(APP_DATA_DIR, "collections")
+BACKUPS_DIR = os.path.join(APP_DATA_DIR, "backups")
+WORKSPACES_DIR = os.path.join(APP_DATA_DIR, "workspaces")
+USERS_FILE = os.path.join(APP_DATA_DIR, "users.json")
+AUTH_DB = os.path.join(APP_DATA_DIR, "auth.db")
 DEFAULT_COLLECTION = "default"
 DOCUMENTS_JSON = "documents.json"
 FILE_METADATA_JSON = "file_metadata.json"
@@ -550,6 +551,7 @@ def verify_password(password: str, stored_hash: str) -> bool:
 
 
 def initialize_auth_database():
+    os.makedirs(os.path.dirname(AUTH_DB) or ".", exist_ok=True)
     with sqlite3.connect(AUTH_DB) as connection:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute(

@@ -33,6 +33,6 @@ Implemented feature areas:
 
 Authentication uses SQLite with PBKDF2 password hashes. For production OIDC, copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml`, replace its client values, and register both your local and deployed callback URLs with the identity provider. The app exposes an OIDC sign-in path when Streamlit authentication is configured.
 
-CI runs compilation and pytest through `.github/workflows/ci.yml`. A Docker-based Render deployment template is provided in `render.yaml`. Local JSON/FAISS/workspace data needs persistent storage in production.
+CI runs compilation and pytest through `.github/workflows/ci.yml`. A Docker-based Render deployment template is provided in `render.yaml` with a persistent `/app/data` disk. The app stores JSON, SQLite, FAISS, backups, and workspaces under `APP_DATA_DIR`; Docker deployments can mount `/app/data` as a volume.
 
 Generated local folders are ignored by Git: `collections/`, `backups/`, `faiss_index/`, `workspaces/`, and `users.json`.
