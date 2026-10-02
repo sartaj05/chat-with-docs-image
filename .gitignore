@@ -5,5 +5,7 @@ __pycache__/
 collections/
 backups/
 faiss_index/
+workspaces/
+users.json
 info.txt
 .streamlit/secrets.toml

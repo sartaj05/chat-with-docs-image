@@ -1,6 +1,6 @@
-# Chat With Docs Image - Phase 7
+# Chat With Docs Image
 
-Local Streamlit document assistant with PDF, scanned PDF OCR, image OCR, DOCX, Gemini Q&A, FAISS + BM25 hybrid search, multi-collection search, and local ZIP backup/import/export.
+Local Streamlit document assistant with document comparison, OCR, multi-collection hybrid retrieval, source navigation, file management, chat export, optional ML reranking, Ollama offline mode, streaming answers, and local multi-user workspaces.
 
 ## Setup
 
@@ -16,4 +16,18 @@ Create `.env` from `.env.example`, then run:
 streamlit run app.py
 ```
 
-Generated local folders are ignored by Git: `collections/`, `backups/`, `faiss_index/`.
+Gemini is the default provider. For offline mode, install Ollama, pull a chat model such as `llama3.2` and an embedding model such as `nomic-embed-text`, then choose `Ollama Offline` inside the app. ML reranking uses `cross-encoder/ms-marco-MiniLM-L-6-v2` and is enabled from the AI settings panel.
+
+Implemented feature areas:
+
+- Compare two documents with an AI change summary and unified diff.
+- Jump from each source result to its highlighted preview.
+- Filter by file type, filename, page, category, tag, and minimum relevance.
+- Manage individual indexed files: preview, rename, delete, reindex, tag, and categorize.
+- Export collection chat history as TXT, Markdown, or DOCX.
+- Optional cross-encoder reranking.
+- Gemini Cloud or Ollama Offline provider selection.
+- Streaming answers with `st.write_stream`.
+- Local account registration, login, logout, isolated workspaces, and persisted chat history.
+
+Generated local folders are ignored by Git: `collections/`, `backups/`, `faiss_index/`, `workspaces/`, and `users.json`.
