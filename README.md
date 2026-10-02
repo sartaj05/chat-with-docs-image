@@ -35,4 +35,6 @@ Authentication uses SQLite with PBKDF2 password hashes. For production OIDC, cop
 
 CI runs compilation and pytest through `.github/workflows/ci.yml`. A Docker-based Render deployment template is provided in `render.yaml` with a persistent `/app/data` disk. The app stores JSON, SQLite, FAISS, backups, and workspaces under `APP_DATA_DIR`; Docker deployments can mount `/app/data` as a volume.
 
+External integration tests are opt-in: set `RUN_EXTERNAL_TESTS=1` with `GOOGLE_API_KEY` for Gemini, or set `RUN_OLLAMA_TESTS=1` with a running local Ollama service. Plain `pytest` skips these network-dependent tests.
+
 Generated local folders are ignored by Git: `collections/`, `backups/`, `faiss_index/`, `workspaces/`, and `users.json`.
