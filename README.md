@@ -31,7 +31,7 @@ Implemented feature areas:
 - Optional layout-aware OCR that preserves detected block, paragraph, and line order.
 - Local account registration, login, logout, isolated workspaces, and persisted chat history.
 
-Authentication uses SQLite with PBKDF2 password hashes. For production, configure Streamlit OIDC in `.streamlit/secrets.toml`; the app exposes an OIDC sign-in path when Streamlit authentication is configured.
+Authentication uses SQLite with PBKDF2 password hashes. For production OIDC, copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml`, replace its client values, and register both your local and deployed callback URLs with the identity provider. The app exposes an OIDC sign-in path when Streamlit authentication is configured.
 
 CI runs compilation and pytest through `.github/workflows/ci.yml`. A Docker-based Render deployment template is provided in `render.yaml`. Local JSON/FAISS/workspace data needs persistent storage in production.
 
