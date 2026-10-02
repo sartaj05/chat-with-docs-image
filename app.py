@@ -1137,6 +1137,38 @@ def split_text_with_metadata(text: str, base_metadata: Dict) -> List[LCDocument]
     return documents
 
 
+def layout_aware_ocr(image) -> str:
+    """Read OCR words in their detected block/paragraph/line order."""
+    try:
+        data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+        grouped = {}
+        for index, text in enumerate(data.get("text", [])):
+            clean_text = str(text).strip()
+            if not clean_text:
+                continue
+            key = (
+                int(data["block_num"][index]),
+                int(data["par_num"][index]),
+                int(data["line_num"][index])
+            )
+            grouped.setdefault(key, []).append((int(data["left"][index]), clean_text))
+        lines = []
+        for key in sorted(grouped):
+            words = " ".join(text for _, text in sorted(grouped[key]))
+            if words:
+                lines.append(words)
+        return "\n".join(lines)
+    except Exception:
+        return pytesseract.image_to_string(image)
+
+
+def extract_ocr_text(image) -> Tuple[str, bool]:
+    use_layout = st.session_state.get("layout_aware_ocr", False)
+    if use_layout:
+        return layout_aware_ocr(image), True
+    return pytesseract.image_to_string(image), False
+
+
 def extract_documents_from_pdfs(pdf_docs) -> List[LCDocument]:
     documents = []
     for pdf in pdf_docs:
@@ -1156,9 +1188,14 @@ def extract_documents_from_pdfs(pdf_docs) -> List[LCDocument]:
                 for page_index, image in enumerate(images, start=1):
                     if page_index not in pages_needing_ocr:
                         continue
-                    scanned_text = pytesseract.image_to_string(image)
+                    scanned_text, used_layout_ocr = extract_ocr_text(image)
                     if scanned_text.strip():
-                        documents.extend(split_text_with_metadata(scanned_text, {"file_name": pdf.name, "file_type": "Scanned PDF OCR", "page": page_index}))
+                        documents.extend(split_text_with_metadata(scanned_text, {
+                            "file_name": pdf.name,
+                            "file_type": "Scanned PDF OCR",
+                            "page": page_index,
+                            "layout_ocr": used_layout_ocr
+                        }))
         except Exception as e:
             st.error(f"Error extracting PDF text from {pdf.name}: {e}")
     return documents
@@ -1169,9 +1206,13 @@ def extract_documents_from_images(image_docs) -> List[LCDocument]:
     for image_file in image_docs:
         try:
             image = Image.open(image_file)
-            image_text = pytesseract.image_to_string(image)
+            image_text, used_layout_ocr = extract_ocr_text(image)
             if image_text.strip():
-                documents.extend(split_text_with_metadata(image_text, {"file_name": image_file.name, "file_type": "Image OCR"}))
+                documents.extend(split_text_with_metadata(image_text, {
+                    "file_name": image_file.name,
+                    "file_type": "Image OCR",
+                    "layout_ocr": used_layout_ocr
+                }))
         except Exception as e:
             st.error(f"Error extracting image text from {image_file.name}: {e}")
     return documents
@@ -2145,6 +2186,12 @@ def render_ai_settings():
                 key="ollama_embedding_model_input"
             )
             st.caption("Install Ollama and pull both models locally before indexing.")
+        st.session_state.layout_aware_ocr = st.checkbox(
+            "Use layout-aware OCR",
+            value=st.session_state.get("layout_aware_ocr", False),
+            key="layout_ocr_checkbox",
+            help="Preserve detected OCR block, paragraph, and line order for scanned PDFs and images. Reindex after changing it."
+        )
         st.session_state.use_reranker = st.checkbox(
             "Use ML reranking",
             value=st.session_state.get("use_reranker", False),

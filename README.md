@@ -28,6 +28,7 @@ Implemented feature areas:
 - Optional cross-encoder reranking.
 - Gemini Cloud or Ollama Offline provider selection.
 - Streaming answers with `st.write_stream`.
+- Optional layout-aware OCR that preserves detected block, paragraph, and line order.
 - Local account registration, login, logout, isolated workspaces, and persisted chat history.
 
 Authentication uses SQLite with PBKDF2 password hashes. For production, configure Streamlit OIDC in `.streamlit/secrets.toml`; the app exposes an OIDC sign-in path when Streamlit authentication is configured.
