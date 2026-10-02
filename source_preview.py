@@ -91,10 +91,16 @@ def render_source_preview(
 
         preview = doc.page_content[:1200].strip()
         highlighted_preview = highlight_text(preview, query)
+        anchor_id = f"source-{index}-{abs(hash(label))}"
+
+        st.markdown(
+            f'<a href="#{anchor_id}">↘ Jump to source {index}</a>',
+            unsafe_allow_html=True
+        )
 
         st.markdown(
             f"""
-            <div class="source-card">
+            <div id="{anchor_id}" class="source-card">
                 <b>{index}. {html.escape(label)}</b>
                 <span class="collection-pill">{html.escape(collection)}</span>
                 <span class="score-pill">Score: {final_score}</span>
