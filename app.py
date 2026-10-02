@@ -1716,6 +1716,59 @@ def build_document_diff(old_text: str, new_text: str) -> str:
     return "\n".join(diff)
 
 
+def extract_comparison_visuals(uploaded_file, max_pages: int = 4):
+    name = uploaded_file.name.lower()
+    try:
+        uploaded_file.seek(0)
+        if name.endswith(".pdf"):
+            return convert_from_bytes(uploaded_file.read(), first_page=1, last_page=max_pages)
+        if name.endswith((".jpg", ".jpeg", ".png")):
+            return [Image.open(uploaded_file).copy()]
+    except Exception:
+        return []
+    return []
+
+
+def extract_comparison_tables(uploaded_file) -> List[Tuple[str, pd.DataFrame]]:
+    name = uploaded_file.name.lower()
+    try:
+        uploaded_file.seek(0)
+        if name.endswith(".csv"):
+            return [(uploaded_file.name, pd.read_csv(uploaded_file))]
+        if name.endswith(".xlsx"):
+            sheets = pd.read_excel(uploaded_file, sheet_name=None)
+            return [(sheet_name, dataframe) for sheet_name, dataframe in sheets.items()]
+        if name.endswith(".docx"):
+            document = Document(uploaded_file)
+            tables = []
+            for index, table in enumerate(document.tables, start=1):
+                rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
+                if rows:
+                    tables.append((f"Table {index}", pd.DataFrame(rows)))
+            return tables
+    except Exception:
+        return []
+    return []
+
+
+def build_table_diff(old_tables: List[Tuple[str, pd.DataFrame]], new_tables: List[Tuple[str, pd.DataFrame]]) -> str:
+    old_text = []
+    new_text = []
+    for name, dataframe in old_tables:
+        old_text.append(f"--- {name} ---")
+        old_text.extend(dataframe.fillna("").astype(str).to_csv(index=False, header=False).splitlines())
+    for name, dataframe in new_tables:
+        new_text.append(f"--- {name} ---")
+        new_text.extend(dataframe.fillna("").astype(str).to_csv(index=False, header=False).splitlines())
+    return "\n".join(difflib.unified_diff(
+        old_text,
+        new_text,
+        fromfile="Original tables",
+        tofile="Updated tables",
+        lineterm=""
+    ))
+
+
 def generate_comparison_report(old_name: str, new_name: str, old_text: str, new_text: str, diff_text: str) -> str:
     prompt = f"""
 Compare the original and updated documents below. Identify important additions, removals, changed values,
@@ -2076,6 +2129,38 @@ def render_document_comparison():
                             st.error(f"AI comparison failed: {error}")
                         st.markdown("### Detailed Text Diff")
                         st.code(diff_text or "No text changes detected.", language="diff")
+
+                        old_tables = extract_comparison_tables(old_file)
+                        new_tables = extract_comparison_tables(new_file)
+                        if old_tables or new_tables:
+                            st.markdown("### Table/Layout Comparison")
+                            table_columns = st.columns(2)
+                            with table_columns[0]:
+                                st.markdown(f"**Original tables ({len(old_tables)})**")
+                                for table_name, dataframe in old_tables:
+                                    st.caption(table_name)
+                                    st.dataframe(dataframe, use_container_width=True, hide_index=True)
+                            with table_columns[1]:
+                                st.markdown(f"**Updated tables ({len(new_tables)})**")
+                                for table_name, dataframe in new_tables:
+                                    st.caption(table_name)
+                                    st.dataframe(dataframe, use_container_width=True, hide_index=True)
+                            st.markdown("#### Table Cell Diff")
+                            st.code(build_table_diff(old_tables, new_tables) or "No table cell changes detected.", language="diff")
+
+                        old_visuals = extract_comparison_visuals(old_file)
+                        new_visuals = extract_comparison_visuals(new_file)
+                        if old_visuals or new_visuals:
+                            st.markdown("### Visual Preview")
+                            visual_columns = st.columns(2)
+                            with visual_columns[0]:
+                                st.markdown("**Original preview**")
+                                for image in old_visuals:
+                                    st.image(image, use_container_width=True)
+                            with visual_columns[1]:
+                                st.markdown("**Updated preview**")
+                                for image in new_visuals:
+                                    st.image(image, use_container_width=True)
 
 def get_file_type_counts(uploaded_files):
     counts = {"PDF": 0, "Image": 0, "DOCX": 0, "TXT": 0, "CSV": 0, "XLSX": 0, "PPTX": 0}
