@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: chat-with-docs-image
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: GOOGLE_API_KEY
+        sync: false
