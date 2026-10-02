@@ -4,6 +4,10 @@ import json
 import shutil
 import zipfile
 import platform
+import io
+import difflib
+import hashlib
+import secrets
 from datetime import datetime
 from typing import List, Dict, Tuple
 from source_preview import render_source_preview
@@ -38,26 +42,47 @@ from dashboard_memory_suggestions import (
 
 load_dotenv()
 api_key = os.getenv("GOOGLE_API_KEY")
+if api_key:
+    genai.configure(api_key=api_key)
 
-if not api_key:
-    st.error("GOOGLE_API_KEY is missing. Add it inside your .env file.")
-    st.stop()
+try:
+    from sentence_transformers import CrossEncoder
+except ImportError:
+    CrossEncoder = None
 
-genai.configure(api_key=api_key)
+try:
+    from langchain_ollama import ChatOllama, OllamaEmbeddings
+except ImportError:
+    try:
+        from langchain_community.chat_models import ChatOllama
+        from langchain_community.embeddings import OllamaEmbeddings
+    except ImportError:
+        ChatOllama = None
+        OllamaEmbeddings = None
 
 if platform.system() == "Windows":
-    tesseract_path = r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
+    tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
     if os.path.exists(tesseract_path):
         pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
 
 COLLECTIONS_DIR = "collections"
 BACKUPS_DIR = "backups"
+WORKSPACES_DIR = "workspaces"
+USERS_FILE = "users.json"
 DEFAULT_COLLECTION = "default"
 DOCUMENTS_JSON = "documents.json"
+FILE_METADATA_JSON = "file_metadata.json"
+CHAT_HISTORY_JSON = "chat_history.json"
 
 SEARCH_CURRENT_COLLECTION = "Current Collection"
 SEARCH_ALL_COLLECTIONS = "All Collections"
+AI_GEMINI = "Gemini Cloud"
+AI_OLLAMA = "Ollama Offline"
+DEFAULT_OLLAMA_CHAT_MODEL = "llama3.2"
+DEFAULT_OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
+RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+FILE_CATEGORIES = ["Uncategorized", "Work", "Finance", "Legal", "Research", "Personal", "Other"]
 
 
 def apply_custom_css():
@@ -424,6 +449,128 @@ def initialize_session_state():
         st.session_state.chat_histories = {}
     if "active_collection" not in st.session_state:
         st.session_state.active_collection = DEFAULT_COLLECTION
+    if "authenticated_user" not in st.session_state:
+        st.session_state.authenticated_user = None
+    if "ai_provider" not in st.session_state:
+        st.session_state.ai_provider = AI_GEMINI
+    if "ollama_chat_model" not in st.session_state:
+        st.session_state.ollama_chat_model = DEFAULT_OLLAMA_CHAT_MODEL
+    if "ollama_embedding_model" not in st.session_state:
+        st.session_state.ollama_embedding_model = DEFAULT_OLLAMA_EMBEDDING_MODEL
+    if "use_reranker" not in st.session_state:
+        st.session_state.use_reranker = False
+    if "search_filters" not in st.session_state:
+        st.session_state.search_filters = {
+            "file_type": "All file types",
+            "filename": "",
+            "page": None,
+            "min_score": 0.0
+        }
+
+
+def hash_password(password: str, salt: bytes = None) -> str:
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 120000)
+    return f"{salt.hex()}${digest.hex()}"
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    try:
+        salt_hex, digest_hex = stored_hash.split("$", 1)
+        salt = bytes.fromhex(salt_hex)
+        candidate = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 120000)
+        return secrets.compare_digest(candidate.hex(), digest_hex)
+    except (ValueError, TypeError):
+        return False
+
+
+def load_users() -> Dict:
+    if not os.path.exists(USERS_FILE):
+        return {}
+    try:
+        with open(USERS_FILE, "r", encoding="utf-8") as file:
+            return json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_users(users: Dict):
+    with open(USERS_FILE, "w", encoding="utf-8") as file:
+        json.dump(users, file, indent=2)
+
+
+def migrate_legacy_collections(username: str):
+    legacy_path = COLLECTIONS_DIR
+    target_path = os.path.join(WORKSPACES_DIR, sanitize_collection_name(username), "collections")
+    if not os.path.isdir(legacy_path):
+        return
+    os.makedirs(target_path, exist_ok=True)
+    for item in os.listdir(legacy_path):
+        source = os.path.join(legacy_path, item)
+        target = os.path.join(target_path, item)
+        if os.path.isdir(source) and not os.path.exists(target):
+            shutil.copytree(source, target)
+
+
+def register_user(username: str, password: str) -> Tuple[bool, str]:
+    username = sanitize_collection_name(username)
+    if len(username) < 3:
+        return False, "Username must contain at least 3 letters or numbers."
+    if len(password) < 6:
+        return False, "Password must contain at least 6 characters."
+    users = load_users()
+    if username in users:
+        return False, "That username already exists."
+    users[username] = {
+        "password_hash": hash_password(password),
+        "created_at": datetime.now().isoformat(timespec="seconds")
+    }
+    save_users(users)
+    migrate_legacy_collections(username)
+    return True, "Account created."
+
+
+def render_auth_gate() -> bool:
+    if st.session_state.get("authenticated_user"):
+        return True
+
+    st.markdown("## 🔐 Sign in to your workspace")
+    st.caption("Each account receives an isolated local document workspace.")
+    login_tab, register_tab = st.tabs(["Sign in", "Create account"])
+
+    with login_tab:
+        with st.form("login_form"):
+            username = st.text_input("Username", key="login_username")
+            password = st.text_input("Password", type="password", key="login_password")
+            submitted = st.form_submit_button("Sign in", use_container_width=True)
+        if submitted:
+            users = load_users()
+            clean_username = sanitize_collection_name(username)
+            if clean_username in users and verify_password(password, users[clean_username].get("password_hash", "")):
+                st.session_state.authenticated_user = clean_username
+                st.session_state.active_collection = DEFAULT_COLLECTION
+                st.rerun()
+            else:
+                st.error("Invalid username or password.")
+
+    with register_tab:
+        with st.form("register_form"):
+            new_username = st.text_input("New username", key="register_username")
+            new_password = st.text_input("New password", type="password", key="register_password")
+            confirm_password = st.text_input("Confirm password", type="password", key="register_confirm")
+            submitted = st.form_submit_button("Create account", use_container_width=True)
+        if submitted:
+            if new_password != confirm_password:
+                st.error("Passwords do not match.")
+            else:
+                success, message = register_user(new_username, new_password)
+                if success:
+                    st.session_state.authenticated_user = sanitize_collection_name(new_username)
+                    st.session_state.active_collection = DEFAULT_COLLECTION
+                    st.rerun()
+                else:
+                    st.error(message)
+    return False
 
 
 def sanitize_collection_name(name: str) -> str:
@@ -431,21 +578,44 @@ def sanitize_collection_name(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "_", name)
 
 
+def get_workspace_root() -> str:
+    username = st.session_state.get("authenticated_user")
+    if not username:
+        return "."
+    return os.path.join(WORKSPACES_DIR, sanitize_collection_name(username))
+
+
+def get_collections_dir() -> str:
+    if st.session_state.get("authenticated_user"):
+        return os.path.join(get_workspace_root(), COLLECTIONS_DIR)
+    return COLLECTIONS_DIR
+
+
+def get_backups_dir() -> str:
+    if st.session_state.get("authenticated_user"):
+        return os.path.join(get_workspace_root(), BACKUPS_DIR)
+    return BACKUPS_DIR
+
+
 def ensure_collections_dir():
-    os.makedirs(COLLECTIONS_DIR, exist_ok=True)
+    os.makedirs(get_collections_dir(), exist_ok=True)
 
 
 def ensure_backups_dir():
-    os.makedirs(BACKUPS_DIR, exist_ok=True)
+    os.makedirs(get_backups_dir(), exist_ok=True)
 
 
 def get_collection_path(collection_name: str) -> str:
     ensure_collections_dir()
-    return os.path.join(COLLECTIONS_DIR, collection_name)
+    return os.path.join(get_collections_dir(), collection_name)
 
 
 def get_documents_json_path(collection_name: str) -> str:
     return os.path.join(get_collection_path(collection_name), DOCUMENTS_JSON)
+
+
+def get_file_metadata_path(collection_name: str) -> str:
+    return os.path.join(get_collection_path(collection_name), FILE_METADATA_JSON)
 
 
 def collection_exists(collection_name: str) -> bool:
@@ -454,9 +624,10 @@ def collection_exists(collection_name: str) -> bool:
 
 def list_collections():
     ensure_collections_dir()
+    collections_dir = get_collections_dir()
     collections = []
-    for item in os.listdir(COLLECTIONS_DIR):
-        full_path = os.path.join(COLLECTIONS_DIR, item)
+    for item in os.listdir(collections_dir):
+        full_path = os.path.join(collections_dir, item)
         if os.path.isdir(full_path):
             collections.append(item)
     collections.sort()
@@ -499,7 +670,7 @@ def collection_has_documents_json(collection_name: str):
 
 def reset_collection_index(collection_name: str):
     path = get_collection_index_path(collection_name)
-    for file_name in ["index.faiss", "index.pkl", DOCUMENTS_JSON]:
+    for file_name in ["index.faiss", "index.pkl", DOCUMENTS_JSON, FILE_METADATA_JSON]:
         file_path = os.path.join(path, file_name)
         if os.path.exists(file_path):
             os.remove(file_path)
@@ -530,7 +701,7 @@ def export_selected_collection(collection_name: str):
     if not os.path.exists(collection_path):
         return None
     output_name = get_backup_file_name(collection_name)
-    output_path = os.path.join(BACKUPS_DIR, output_name)
+    output_path = os.path.join(get_backups_dir(), output_name)
     zip_folder(collection_path, output_path)
     return output_path
 
@@ -538,11 +709,12 @@ def export_selected_collection(collection_name: str):
 def export_all_collections():
     ensure_backups_dir()
     ensure_collections_dir()
-    if not os.path.exists(COLLECTIONS_DIR):
+    collections_dir = get_collections_dir()
+    if not os.path.exists(collections_dir):
         return None
     output_name = get_backup_file_name("all_collections_backup")
-    output_path = os.path.join(BACKUPS_DIR, output_name)
-    zip_folder(COLLECTIONS_DIR, output_path)
+    output_path = os.path.join(get_backups_dir(), output_name)
+    zip_folder(collections_dir, output_path)
     return output_path
 
 
@@ -554,22 +726,30 @@ def import_collection_zip(uploaded_zip_file, collection_name: str):
     if not uploaded_zip_file.name.lower().endswith(".zip"):
         return False, "Please upload a ZIP file."
     target_path = get_collection_path(collection_name)
-    if os.path.exists(target_path):
-        shutil.rmtree(target_path)
-    os.makedirs(target_path, exist_ok=True)
+    temp_path = f"{target_path}.importing_{secrets.token_hex(4)}"
     try:
         with zipfile.ZipFile(uploaded_zip_file, "r") as zip_ref:
-            zip_ref.extractall(target_path)
-        return True, f"Collection imported as: {collection_name}"
-    except Exception as e:
+            temp_abs = os.path.abspath(temp_path)
+            for member in zip_ref.infolist():
+                member_abs = os.path.abspath(os.path.join(temp_path, member.filename))
+                if os.path.commonpath([temp_abs, member_abs]) != temp_abs:
+                    return False, "Import blocked: ZIP contains an unsafe path."
+            os.makedirs(temp_path, exist_ok=True)
+            zip_ref.extractall(temp_path)
         if os.path.exists(target_path):
             shutil.rmtree(target_path)
+        os.replace(temp_path, target_path)
+        return True, f"Collection imported as: {collection_name}"
+    except Exception as e:
+        if os.path.exists(temp_path):
+            shutil.rmtree(temp_path)
         return False, f"Import failed: {e}"
 
 
 def clear_all_collections():
-    if os.path.exists(COLLECTIONS_DIR):
-        shutil.rmtree(COLLECTIONS_DIR)
+    collections_dir = get_collections_dir()
+    if os.path.exists(collections_dir):
+        shutil.rmtree(collections_dir)
     ensure_collections_dir()
     st.session_state.chat_histories = {}
     st.session_state.active_collection = DEFAULT_COLLECTION
@@ -582,8 +762,32 @@ def read_file_as_bytes(file_path: str):
 
 def get_chat_history(collection_name: str):
     if collection_name not in st.session_state.chat_histories:
-        st.session_state.chat_histories[collection_name] = []
+        history_path = os.path.join(get_collection_path(collection_name), CHAT_HISTORY_JSON)
+        history = []
+        if os.path.exists(history_path):
+            try:
+                with open(history_path, "r", encoding="utf-8") as file:
+                    raw_history = json.load(file)
+                for item in raw_history:
+                    item["sources"] = deserialize_documents(item.get("sources", []))
+                    history.append(item)
+            except (OSError, json.JSONDecodeError):
+                history = []
+        st.session_state.chat_histories[collection_name] = history
     return st.session_state.chat_histories[collection_name]
+
+
+def persist_chat_history(collection_name: str):
+    history_path = os.path.join(get_collection_path(collection_name), CHAT_HISTORY_JSON)
+    os.makedirs(get_collection_path(collection_name), exist_ok=True)
+    serializable = []
+    for item in get_chat_history(collection_name):
+        serializable.append({
+            **item,
+            "sources": serialize_documents(item.get("sources", []))
+        })
+    with open(history_path, "w", encoding="utf-8") as file:
+        json.dump(serializable, file, ensure_ascii=False, indent=2)
 
 
 def save_chat_message(
@@ -605,10 +809,12 @@ def save_chat_message(
             "source_query": source_query
         }
     )
+    persist_chat_history(collection_name)
 
 
 def clear_chat_history(collection_name: str):
     st.session_state.chat_histories[collection_name] = []
+    persist_chat_history(collection_name)
 
 
 def build_source_label(metadata: Dict) -> str:
@@ -641,8 +847,95 @@ def build_chat_history_text(collection_name: str):
     return "\n".join(lines)
 
 
+def build_chat_history_markdown(collection_name: str) -> str:
+    history = get_chat_history(collection_name)
+    lines = [f"# Chat History — {collection_name}", ""]
+    for index, item in enumerate(history, start=1):
+        lines.extend([
+            f"## Question {index}",
+            item.get("question", ""),
+            "",
+            "### Answer",
+            item.get("answer", ""),
+            "",
+            f"**Search mode:** {item.get('search_mode', SEARCH_CURRENT_COLLECTION)}",
+            "",
+            "### Sources",
+            build_sources_text(item.get("sources", [])),
+            ""
+        ])
+    return "\n".join(lines)
+
+
+def generate_chat_history_docx(collection_name: str) -> bytes:
+    document = Document()
+    document.add_heading(f"Chat History — {collection_name}", level=1)
+    for index, item in enumerate(get_chat_history(collection_name), start=1):
+        document.add_heading(f"Question {index}", level=2)
+        document.add_paragraph(item.get("question", ""))
+        document.add_heading("Answer", level=3)
+        document.add_paragraph(item.get("answer", ""))
+        document.add_paragraph(f"Search mode: {item.get('search_mode', SEARCH_CURRENT_COLLECTION)}")
+        document.add_heading("Sources", level=3)
+        document.add_paragraph(build_sources_text(item.get("sources", [])))
+    output = io.BytesIO()
+    document.save(output)
+    return output.getvalue()
+
+
+def get_ai_provider() -> str:
+    return st.session_state.get("ai_provider", AI_GEMINI)
+
+
 def get_embeddings():
+    if get_ai_provider() == AI_OLLAMA:
+        if OllamaEmbeddings is None:
+            raise RuntimeError("Ollama support is not installed. Install langchain-ollama and run Ollama locally.")
+        return OllamaEmbeddings(
+            model=st.session_state.get("ollama_embedding_model", DEFAULT_OLLAMA_EMBEDDING_MODEL)
+        )
+    if not api_key:
+        raise RuntimeError("GOOGLE_API_KEY is missing. Select Ollama Offline or configure Gemini.")
     return GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", google_api_key=api_key)
+
+
+def get_chat_model(temperature: float = 0.2):
+    if get_ai_provider() == AI_OLLAMA:
+        if ChatOllama is None:
+            raise RuntimeError("Ollama support is not installed. Install langchain-ollama and run Ollama locally.")
+        return ChatOllama(
+            model=st.session_state.get("ollama_chat_model", DEFAULT_OLLAMA_CHAT_MODEL),
+            temperature=temperature
+        )
+    if not api_key:
+        raise RuntimeError("GOOGLE_API_KEY is missing. Configure the key or select Ollama Offline.")
+    return ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        temperature=temperature,
+        google_api_key=api_key
+    )
+
+
+@st.cache_resource(show_spinner=False)
+def load_reranker_model():
+    if CrossEncoder is None:
+        return None
+    return CrossEncoder(RERANK_MODEL)
+
+
+def rerank_documents(query: str, documents: List[LCDocument], k: int) -> List[LCDocument]:
+    if not documents:
+        return []
+    model = load_reranker_model()
+    if model is None:
+        st.warning("ML reranking is unavailable. Install sentence-transformers to enable it.")
+        return documents[:k]
+    pairs = [(query, doc.page_content[:5000]) for doc in documents]
+    scores = model.predict(pairs)
+    ranked = sorted(zip(documents, scores), key=lambda item: float(item[1]), reverse=True)
+    for doc, score in ranked:
+        doc.metadata["rerank_score"] = round(float(score), 4)
+    return [doc for doc, _ in ranked[:k]]
 
 
 def tokenize_text(text: str):
@@ -673,6 +966,107 @@ def load_documents_json(collection_name: str) -> List[LCDocument]:
     return deserialize_documents(raw_documents)
 
 
+def load_file_metadata(collection_name: str) -> Dict:
+    path = get_file_metadata_path(collection_name)
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            raw = json.load(file)
+        return raw if isinstance(raw, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_file_metadata(collection_name: str, metadata: Dict):
+    os.makedirs(get_collection_path(collection_name), exist_ok=True)
+    with open(get_file_metadata_path(collection_name), "w", encoding="utf-8") as file:
+        json.dump(metadata, file, ensure_ascii=False, indent=2)
+
+
+def get_collection_files(collection_name: str) -> List[Dict]:
+    documents = load_documents_json(collection_name)
+    registry = load_file_metadata(collection_name)
+    files = {}
+    for doc in documents:
+        file_name = doc.metadata.get("file_name", "Unknown")
+        if file_name not in files:
+            files[file_name] = {
+                "file_name": file_name,
+                "file_type": doc.metadata.get("file_type", "Unknown"),
+                "chunks": 0,
+                "preview": doc.page_content[:1800]
+            }
+        files[file_name]["chunks"] += 1
+    result = []
+    for file_name, item in sorted(files.items()):
+        saved = registry.get(file_name, {})
+        item["category"] = saved.get("category", "Uncategorized")
+        item["tags"] = saved.get("tags", [])
+        result.append(item)
+    return result
+
+
+def update_file_metadata(collection_name: str, file_name: str, category: str, tags_text: str):
+    registry = load_file_metadata(collection_name)
+    tags = [tag.strip() for tag in re.split(r"[,\n]", tags_text) if tag.strip()]
+    registry[file_name] = {
+        "category": category if category in FILE_CATEGORIES else "Uncategorized",
+        "tags": list(dict.fromkeys(tags))
+    }
+    save_file_metadata(collection_name, registry)
+
+
+def remove_index_files(collection_name: str):
+    path = get_collection_path(collection_name)
+    for file_name in ["index.faiss", "index.pkl"]:
+        file_path = os.path.join(path, file_name)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+
+def rebuild_collection_index(collection_name: str) -> bool:
+    documents = load_documents_json(collection_name)
+    remove_index_files(collection_name)
+    if not documents:
+        return True
+    return create_faiss_vector_store(collection_name, documents) is not None
+
+
+def delete_collection_file(collection_name: str, file_name: str) -> bool:
+    documents = load_documents_json(collection_name)
+    remaining = [doc for doc in documents if doc.metadata.get("file_name") != file_name]
+    if len(remaining) == len(documents):
+        return False
+    save_documents_json(collection_name, remaining)
+    registry = load_file_metadata(collection_name)
+    registry.pop(file_name, None)
+    save_file_metadata(collection_name, registry)
+    return rebuild_collection_index(collection_name)
+
+
+def rename_collection_file(collection_name: str, old_name: str, new_name: str) -> bool:
+    new_name = os.path.basename(new_name.strip())
+    if not new_name or new_name == old_name:
+        return False
+    documents = load_documents_json(collection_name)
+    if any(doc.metadata.get("file_name") == new_name for doc in documents):
+        return False
+    changed = False
+    for doc in documents:
+        if doc.metadata.get("file_name") == old_name:
+            doc.metadata["file_name"] = new_name
+            changed = True
+    if not changed:
+        return False
+    save_documents_json(collection_name, documents)
+    registry = load_file_metadata(collection_name)
+    if old_name in registry:
+        registry[new_name] = registry.pop(old_name)
+    save_file_metadata(collection_name, registry)
+    return rebuild_collection_index(collection_name)
+
+
 def split_text_with_metadata(text: str, base_metadata: Dict) -> List[LCDocument]:
     splitter = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=500)
     chunks = splitter.split_text(text)
@@ -690,16 +1084,19 @@ def extract_documents_from_pdfs(pdf_docs) -> List[LCDocument]:
         try:
             pdf.seek(0)
             reader = PdfReader(pdf)
-            has_normal_text = False
+            pages_needing_ocr = []
             for page_index, page in enumerate(reader.pages, start=1):
                 page_text = page.extract_text() or ""
                 if page_text.strip():
-                    has_normal_text = True
                     documents.extend(split_text_with_metadata(page_text, {"file_name": pdf.name, "file_type": "PDF", "page": page_index}))
-            if not has_normal_text:
+                else:
+                    pages_needing_ocr.append(page_index)
+            if pages_needing_ocr:
                 pdf.seek(0)
                 images = convert_from_bytes(pdf.read())
                 for page_index, image in enumerate(images, start=1):
+                    if page_index not in pages_needing_ocr:
+                        continue
                     scanned_text = pytesseract.image_to_string(image)
                     if scanned_text.strip():
                         documents.extend(split_text_with_metadata(scanned_text, {"file_name": pdf.name, "file_type": "Scanned PDF OCR", "page": page_index}))
@@ -882,9 +1279,49 @@ def make_doc_key(doc: LCDocument) -> str:
     return "|".join([metadata.get("collection", ""), metadata.get("file_name", ""), metadata.get("file_type", ""), str(metadata.get("page", "")), str(metadata.get("chunk", ""))])
 
 
-def hybrid_search_documents(collection_name: str, query: str, k: int = 8) -> List[LCDocument]:
-    vector_results = vector_search_documents(collection_name, query, k=k)
-    keyword_results = bm25_keyword_search_documents(collection_name, query, k=k)
+def document_matches_filters(collection: str, doc: LCDocument, filters: Dict = None) -> bool:
+    if not filters:
+        return True
+    metadata = doc.metadata
+    file_type = filters.get("file_type", "All file types")
+    filename = filters.get("filename", "").strip().lower()
+    page = filters.get("page")
+    min_score = float(filters.get("min_score", 0.0) or 0.0)
+    category = filters.get("category", "All categories")
+    tag = filters.get("tag", "").strip().lower()
+
+    if file_type != "All file types" and metadata.get("file_type") != file_type:
+        return False
+    if filename and filename not in str(metadata.get("file_name", "")).lower():
+        return False
+    if page is not None and str(page).strip():
+        try:
+            if int(metadata.get("page", -1)) != int(page):
+                return False
+        except (TypeError, ValueError):
+            return False
+    if metadata.get("final_score", 0.0) < min_score:
+        return False
+
+    file_name = metadata.get("file_name", "")
+    file_meta = load_file_metadata(collection).get(file_name, {})
+    if category != "All categories" and file_meta.get("category", "Uncategorized") != category:
+        return False
+    if tag and tag not in [str(item).lower() for item in file_meta.get("tags", [])]:
+        return False
+    return True
+
+
+def hybrid_search_documents(
+    collection_name: str,
+    query: str,
+    k: int = 8,
+    filters: Dict = None,
+    use_reranker: bool = False
+) -> List[LCDocument]:
+    candidate_k = max(k * 3, 24) if use_reranker else k
+    vector_results = vector_search_documents(collection_name, query, k=candidate_k)
+    keyword_results = bm25_keyword_search_documents(collection_name, query, k=candidate_k)
     merged = {}
     for doc, score in vector_results:
         doc.metadata["collection"] = collection_name
@@ -907,8 +1344,11 @@ def hybrid_search_documents(collection_name: str, query: str, k: int = 8) -> Lis
         doc.metadata["vector_score"] = round(vector_score, 4)
         doc.metadata["keyword_score"] = round(keyword_score, 4)
         doc.metadata["final_score"] = round(final_score, 4)
-        ranked.append(doc)
+        if document_matches_filters(collection_name, doc, filters):
+            ranked.append(doc)
     ranked.sort(key=lambda doc: doc.metadata.get("final_score", 0), reverse=True)
+    if use_reranker:
+        return rerank_documents(query, ranked, k)
     return ranked[:k]
 
 
@@ -916,25 +1356,52 @@ def get_searchable_collections():
     return [collection for collection in list_collections() if collection_has_index(collection) and collection_has_documents_json(collection)]
 
 
-def search_single_collection(collection_name: str, query: str, k: int = 8):
-    return hybrid_search_documents(collection_name=collection_name, query=query, k=k)
+def search_single_collection(collection_name: str, query: str, k: int = 8, filters: Dict = None, use_reranker: bool = False):
+    return hybrid_search_documents(
+        collection_name=collection_name,
+        query=query,
+        k=k,
+        filters=filters,
+        use_reranker=use_reranker
+    )
 
 
-def search_all_collections(query: str, k: int = 10):
+def search_all_collections(query: str, k: int = 10, filters: Dict = None, use_reranker: bool = False):
     all_results = []
     for collection_name in get_searchable_collections():
         try:
-            all_results.extend(search_single_collection(collection_name=collection_name, query=query, k=k))
+            all_results.extend(search_single_collection(
+                collection_name=collection_name,
+                query=query,
+                k=k,
+                filters=filters,
+                use_reranker=False
+            ))
         except Exception as e:
             st.warning(f"Search skipped for {collection_name}: {e}")
     all_results.sort(key=lambda doc: doc.metadata.get("final_score", 0), reverse=True)
+    if use_reranker:
+        return rerank_documents(query, all_results, k)
     return all_results[:k]
 
 
-def search_documents(collection_name: str, query: str, search_mode: str, k: int = 8):
+def search_documents(
+    collection_name: str,
+    query: str,
+    search_mode: str,
+    k: int = 8,
+    filters: Dict = None,
+    use_reranker: bool = False
+):
     if search_mode == SEARCH_ALL_COLLECTIONS:
-        return search_all_collections(query=query, k=k)
-    return search_single_collection(collection_name=collection_name, query=query, k=k)
+        return search_all_collections(query=query, k=k, filters=filters, use_reranker=use_reranker)
+    return search_single_collection(
+        collection_name=collection_name,
+        query=query,
+        k=k,
+        filters=filters,
+        use_reranker=use_reranker
+    )
 
 
 def get_total_collection_count():
@@ -988,41 +1455,6 @@ def show_sources(
         query=query,
         title=title
     )
-    if not docs:
-        return
-    st.markdown(f"### 🔎 {title}")
-    seen = set()
-    unique_docs = []
-    for doc in docs:
-        label = build_source_label(doc.metadata)
-        collection = doc.metadata.get("collection", "unknown")
-        full_label = f"{collection} | {label}"
-        if full_label not in seen:
-            seen.add(full_label)
-            unique_docs.append(doc)
-    for i, doc in enumerate(unique_docs, start=1):
-        label = build_source_label(doc.metadata)
-        collection = doc.metadata.get("collection", "unknown")
-        final_score = doc.metadata.get("final_score", 0)
-        vector_score = doc.metadata.get("vector_score", 0)
-        keyword_score = doc.metadata.get("keyword_score", 0)
-        preview = doc.page_content[:900].strip()
-        st.markdown(
-            f"""
-            <div class="source-card">
-                <b>{i}. {label}</b>
-                <span class="collection-pill">{collection}</span>
-                <span class="score-pill">Score: {final_score}</span>
-                <br>
-                <span class="small-note">
-                    Vector: {vector_score} · Keyword: {keyword_score}
-                </span>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-        with st.expander(f"View source preview {i}", expanded=False):
-            st.write(preview)
 
 
 
@@ -1053,11 +1485,7 @@ Question:
 Answer:
 """
 
-    model = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
-        temperature=0.2,
-        google_api_key=api_key
-    )
+    model = get_chat_model(temperature=0.2)
 
     prompt = PromptTemplate(
         template=prompt_template,
@@ -1098,16 +1526,31 @@ Context:
 
 Write the summary:
 """
-    model = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.3, google_api_key=api_key)
+    model = get_chat_model(temperature=0.3)
     prompt = PromptTemplate(template=prompt_template, input_variables=["context", "instruction", "summary_length_instruction"])
     return load_qa_chain(model, chain_type="stuff", prompt=prompt)
 
 
-def summarize_documents(collection_name: str, user_instruction, search_mode: str, topic=None, summary_length="short") -> Tuple[str, List[LCDocument]]:
+def summarize_documents(
+    collection_name: str,
+    user_instruction,
+    search_mode: str,
+    topic=None,
+    summary_length="short",
+    filters: Dict = None,
+    use_reranker: bool = False
+) -> Tuple[str, List[LCDocument]]:
     query = user_instruction
     if topic:
         query += " " + topic
-    docs = search_documents(collection_name=collection_name, query=query, search_mode=search_mode, k=8)
+    docs = search_documents(
+        collection_name=collection_name,
+        query=query,
+        search_mode=search_mode,
+        k=8,
+        filters=filters,
+        use_reranker=use_reranker
+    )
     if not docs:
         return "", []
     length_mapping = {
@@ -1134,7 +1577,9 @@ def answer_user_question(
     collection_name: str,
     user_question,
     search_mode: str,
-    topic=None
+    topic=None,
+    filters: Dict = None,
+    use_reranker: bool = False
 ) -> Tuple[str, List[LCDocument]]:
     query = user_question
 
@@ -1145,7 +1590,9 @@ def answer_user_question(
         collection_name=collection_name,
         query=query,
         search_mode=search_mode,
-        k=8
+        k=8,
+        filters=filters,
+        use_reranker=use_reranker
     )
 
     if not docs:
@@ -1175,6 +1622,120 @@ def answer_user_question(
         st.error(f"Error generating answer: {e}")
         return "", docs
 
+
+def stream_answer_user_question(
+    collection_name: str,
+    user_question: str,
+    search_mode: str,
+    topic=None,
+    filters: Dict = None,
+    use_reranker: bool = False
+):
+    query = user_question + ((" " + topic) if topic else "")
+    docs = search_documents(
+        collection_name=collection_name,
+        query=query,
+        search_mode=search_mode,
+        k=8,
+        filters=filters,
+        use_reranker=use_reranker
+    )
+    if not docs:
+        return [], iter(["I could not find this information in the uploaded document."])
+
+    chat_memory = build_semantic_chat_context(
+        history=get_chat_history(collection_name),
+        max_messages=5
+    )
+    context = "\n\n".join(doc.page_content for doc in docs)
+    prompt = f"""
+You are a helpful document assistant. Answer only from the provided context and previous chat memory.
+Do not invent information. If the answer is unavailable, say: "I could not find this information in the uploaded document."
+
+Previous Chat Memory:
+{chat_memory}
+
+Context:
+{context}
+
+Question:
+{user_question}
+
+Answer:
+""".strip()
+
+    def token_stream():
+        try:
+            model = get_chat_model(temperature=0.2)
+            for chunk in model.stream(prompt):
+                content = getattr(chunk, "content", chunk)
+                if isinstance(content, list):
+                    content = "".join(
+                        part.get("text", "") if isinstance(part, dict) else str(part)
+                        for part in content
+                    )
+                if content:
+                    yield str(content)
+        except Exception as error:
+            yield f"Streaming failed: {error}"
+
+    return docs, token_stream()
+
+
+def extract_text_for_comparison(uploaded_file) -> str:
+    name = uploaded_file.name.lower()
+    if name.endswith(".pdf"):
+        docs = extract_documents_from_pdfs([uploaded_file])
+    elif name.endswith(('.jpg', '.jpeg', '.png')):
+        docs = extract_documents_from_images([uploaded_file])
+    elif name.endswith(".docx"):
+        docs = extract_documents_from_docx([uploaded_file])
+    elif name.endswith(".txt"):
+        docs = extract_documents_from_txt([uploaded_file])
+    elif name.endswith(".csv"):
+        docs = extract_documents_from_csv([uploaded_file])
+    elif name.endswith(".xlsx"):
+        docs = extract_documents_from_xlsx([uploaded_file])
+    elif name.endswith(".pptx"):
+        docs = extract_documents_from_pptx([uploaded_file])
+    else:
+        return ""
+    return "\n\n".join(doc.page_content for doc in docs)
+
+
+def build_document_diff(old_text: str, new_text: str) -> str:
+    old_lines = old_text.splitlines()
+    new_lines = new_text.splitlines()
+    diff = difflib.unified_diff(
+        old_lines,
+        new_lines,
+        fromfile="Original document",
+        tofile="Updated document",
+        lineterm=""
+    )
+    return "\n".join(diff)
+
+
+def generate_comparison_report(old_name: str, new_name: str, old_text: str, new_text: str, diff_text: str) -> str:
+    prompt = f"""
+Compare the original and updated documents below. Identify important additions, removals, changed values,
+changed clauses, and meaning changes. Do not invent changes. Use clear headings and concise bullet points.
+
+Original file: {old_name}
+Updated file: {new_name}
+
+Original text:
+{old_text[:18000]}
+
+Updated text:
+{new_text[:18000]}
+
+Unified diff:
+{diff_text[:18000]}
+""".strip()
+    response = get_chat_model(temperature=0.1).invoke(prompt)
+    return getattr(response, "content", str(response))
+
 def generate_pdf_summary(summary):
     pdf = FPDF()
     pdf.add_page()
@@ -1194,7 +1755,31 @@ def download_chat_history(collection_name: str):
     if not history:
         return
     chat_text = build_chat_history_text(collection_name)
-    st.download_button(label="⬇️ Download Chat History", data=chat_text, file_name=f"{collection_name}_chat_history.txt", mime="text/plain")
+    col_txt, col_md, col_docx = st.columns(3)
+    with col_txt:
+        st.download_button(
+            label="⬇️ Chat TXT",
+            data=chat_text,
+            file_name=f"{collection_name}_chat_history.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
+    with col_md:
+        st.download_button(
+            label="⬇️ Chat MD",
+            data=build_chat_history_markdown(collection_name),
+            file_name=f"{collection_name}_chat_history.md",
+            mime="text/markdown",
+            use_container_width=True
+        )
+    with col_docx:
+        st.download_button(
+            label="⬇️ Chat DOCX",
+            data=generate_chat_history_docx(collection_name),
+            file_name=f"{collection_name}_chat_history.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True
+        )
 def build_sources_text(source_docs: List[LCDocument]):
     if not source_docs:
         return "No sources found."
@@ -1333,6 +1918,165 @@ def render_chat_history(collection_name: str):
             query=source_query
         )
 
+
+def render_file_manager(collection_name: str):
+    files = get_collection_files(collection_name)
+    with st.expander("📁 File Manager, Tags & Categories", expanded=False):
+        if not files:
+            st.info("No indexed files in this collection yet.")
+            return
+        st.caption("Manage individual files without deleting the whole collection.")
+        for index, item in enumerate(files):
+            file_name = item["file_name"]
+            st.markdown(f"**{file_name}** · {item['file_type']} · {item['chunks']} chunks")
+            category_index = FILE_CATEGORIES.index(item["category"]) if item["category"] in FILE_CATEGORIES else 0
+            category = st.selectbox(
+                "Category",
+                FILE_CATEGORIES,
+                index=category_index,
+                key=f"file_category_{collection_name}_{index}_{file_name}"
+            )
+            tags_text = st.text_input(
+                "Tags (comma separated)",
+                value=", ".join(item["tags"]),
+                key=f"file_tags_{collection_name}_{index}_{file_name}"
+            )
+            rename_to = st.text_input(
+                "Rename file",
+                value=file_name,
+                key=f"file_rename_{collection_name}_{index}_{file_name}"
+            )
+            action_a, action_b, action_c, action_d = st.columns(4)
+            with action_a:
+                if st.button("Save", key=f"file_save_{collection_name}_{index}_{file_name}", use_container_width=True):
+                    update_file_metadata(collection_name, file_name, category, tags_text)
+                    st.success("Metadata saved.")
+                    st.rerun()
+            with action_b:
+                if st.button("Preview", key=f"file_preview_{collection_name}_{index}_{file_name}", use_container_width=True):
+                    st.session_state[f"preview_{collection_name}_{file_name}"] = True
+            with action_c:
+                if st.button("Reindex", key=f"file_reindex_{collection_name}_{index}_{file_name}", use_container_width=True):
+                    if rebuild_collection_index(collection_name):
+                        st.success("Collection reindexed.")
+                    else:
+                        st.error("Reindex failed.")
+            with action_d:
+                if st.button("Delete", key=f"file_delete_{collection_name}_{index}_{file_name}", use_container_width=True):
+                    st.session_state[f"confirm_delete_{collection_name}_{file_name}"] = True
+
+            if st.session_state.get(f"preview_{collection_name}_{file_name}"):
+                st.text_area(
+                    "File preview",
+                    value=item["preview"],
+                    height=130,
+                    key=f"file_preview_text_{collection_name}_{index}_{file_name}"
+                )
+            if st.session_state.get(f"confirm_delete_{collection_name}_{file_name}"):
+                st.warning(f"Delete all indexed chunks for {file_name}?")
+                if st.button("Confirm delete", key=f"file_confirm_delete_{collection_name}_{index}_{file_name}"):
+                    if delete_collection_file(collection_name, file_name):
+                        st.success("File deleted and collection reindexed.")
+                        st.rerun()
+                    st.error("File could not be deleted.")
+            if rename_to.strip() != file_name:
+                if st.button("Apply rename", key=f"file_apply_rename_{collection_name}_{index}_{file_name}"):
+                    if rename_collection_file(collection_name, file_name, rename_to):
+                        st.success("File renamed and collection reindexed.")
+                        st.rerun()
+                    st.error("Rename failed. The new name may already exist.")
+            st.divider()
+
+
+def render_search_filters():
+    file_types = [
+        "All file types", "PDF", "Scanned PDF OCR", "Image OCR", "DOCX",
+        "TXT", "CSV", "XLSX", "PPTX"
+    ]
+    with st.expander("🔎 Advanced Search Filters", expanded=False):
+        file_type = st.selectbox("File type", file_types, key="filter_file_type")
+        filename = st.text_input("Filename contains", key="filter_filename")
+        page = st.number_input("PDF page (0 = any page)", min_value=0, step=1, key="filter_page")
+        category = st.selectbox("Category", ["All categories"] + FILE_CATEGORIES, key="filter_category")
+        tag = st.text_input("Exact tag", key="filter_tag")
+        min_score = st.slider("Minimum relevance score", 0.0, 1.0, 0.0, 0.05, key="filter_min_score")
+    filters = {
+        "file_type": file_type,
+        "filename": filename,
+        "page": int(page) if page else None,
+        "category": category,
+        "tag": tag,
+        "min_score": min_score
+    }
+    st.session_state.search_filters = filters
+    return filters
+
+
+def render_ai_settings():
+    with st.expander("⚙️ AI Provider & Ranking", expanded=False):
+        provider = st.radio("AI provider", [AI_GEMINI, AI_OLLAMA], key="provider_radio")
+        st.session_state.ai_provider = provider
+        if provider == AI_OLLAMA:
+            st.session_state.ollama_chat_model = st.text_input(
+                "Ollama chat model",
+                value=st.session_state.get("ollama_chat_model", DEFAULT_OLLAMA_CHAT_MODEL),
+                key="ollama_chat_model_input"
+            )
+            st.session_state.ollama_embedding_model = st.text_input(
+                "Ollama embedding model",
+                value=st.session_state.get("ollama_embedding_model", DEFAULT_OLLAMA_EMBEDDING_MODEL),
+                key="ollama_embedding_model_input"
+            )
+            st.caption("Install Ollama and pull both models locally before indexing.")
+        st.session_state.use_reranker = st.checkbox(
+            "Use ML reranking",
+            value=st.session_state.get("use_reranker", False),
+            key="reranker_checkbox"
+        )
+        if st.session_state.use_reranker:
+            st.caption(f"Model: {RERANK_MODEL}. The first search downloads it if needed.")
+        streaming = st.checkbox("Stream answers", value=False, key="streaming_checkbox")
+    return streaming
+
+
+def render_document_comparison():
+    with st.expander("🆚 Compare Two Documents", expanded=False):
+        st.caption("Upload an original and updated file to see a line diff and an AI change summary.")
+        old_file = st.file_uploader(
+            "Original document",
+            type=["pdf", "jpg", "jpeg", "png", "docx", "txt", "csv", "xlsx", "pptx"],
+            key="comparison_old_file"
+        )
+        new_file = st.file_uploader(
+            "Updated document",
+            type=["pdf", "jpg", "jpeg", "png", "docx", "txt", "csv", "xlsx", "pptx"],
+            key="comparison_new_file"
+        )
+        if st.button("Compare documents", key="compare_documents_button", use_container_width=True):
+            if not old_file or not new_file:
+                st.warning("Upload both the original and updated document.")
+            else:
+                with st.spinner("Extracting and comparing documents..."):
+                    old_text = extract_text_for_comparison(old_file)
+                    new_text = extract_text_for_comparison(new_file)
+                    if not old_text or not new_text:
+                        st.error("Could not extract text from one of the documents.")
+                    else:
+                        diff_text = build_document_diff(old_text, new_text)
+                        st.markdown("### AI Change Summary")
+                        try:
+                            st.write(generate_comparison_report(
+                                old_file.name,
+                                new_file.name,
+                                old_text,
+                                new_text,
+                                diff_text
+                            ))
+                        except Exception as error:
+                            st.error(f"AI comparison failed: {error}")
+                        st.markdown("### Detailed Text Diff")
+                        st.code(diff_text or "No text changes detected.", language="diff")
+
 def get_file_type_counts(uploaded_files):
     counts = {"PDF": 0, "Image": 0, "DOCX": 0, "TXT": 0, "CSV": 0, "XLSX": 0, "PPTX": 0}
     for file in uploaded_files:
@@ -1358,6 +2102,8 @@ def main():
     st.set_page_config(page_title="Document Summary Assistant", page_icon="📄", layout="wide")
     initialize_session_state()
     apply_custom_css()
+    if not render_auth_gate():
+        return
     st.markdown(
         """
         <div class="sidebar-open-helper">»</div>
@@ -1368,7 +2114,7 @@ def main():
     ensure_backups_dir()
     with st.expander("📊 Collection Dashboard", expanded=False):
         render_collection_dashboard(
-            collections_dir=COLLECTIONS_DIR,
+            collections_dir=get_collections_dir(),
             documents_json=DOCUMENTS_JSON
         )
     st.markdown(
@@ -1383,9 +2129,17 @@ def main():
         """,
         unsafe_allow_html=True
     )
+    render_document_comparison()
 
     with st.sidebar:
-        st.markdown("## 🗂️ Document Library")
+        st.markdown(f"## 🗂️ Document Library · `{st.session_state.authenticated_user}`")
+        if st.button("Log out", use_container_width=True):
+            st.session_state.authenticated_user = None
+            st.session_state.chat_histories = {}
+            st.rerun()
+
+        streaming_enabled = render_ai_settings()
+        active_filters = render_search_filters()
 
         new_collection_name = st.text_input("Create collection", placeholder="Example: project_report")
 
@@ -1432,8 +2186,10 @@ def main():
             unsafe_allow_html=True
         )
 
-        selected_export_path = export_selected_collection(active_collection)
-        if selected_export_path:
+        if st.button("⬇️ Prepare Selected Collection ZIP", use_container_width=True):
+            st.session_state.selected_export_path = export_selected_collection(active_collection)
+        selected_export_path = st.session_state.get("selected_export_path")
+        if selected_export_path and os.path.exists(selected_export_path):
             st.download_button(
                 label="⬇️ Export Selected Collection",
                 data=read_file_as_bytes(selected_export_path),
@@ -1442,8 +2198,10 @@ def main():
                 use_container_width=True
             )
 
-        all_export_path = export_all_collections()
-        if all_export_path:
+        if st.button("⬇️ Prepare All Collections ZIP", use_container_width=True):
+            st.session_state.all_export_path = export_all_collections()
+        all_export_path = st.session_state.get("all_export_path")
+        if all_export_path and os.path.exists(all_export_path):
             st.download_button(
                 label="⬇️ Export All Collections",
                 data=read_file_as_bytes(all_export_path),
@@ -1550,6 +2308,8 @@ def main():
         else:
             st.markdown("""<div class="status-box">ℹ️ No searchable index for active collection. Upload and process files first.</div>""", unsafe_allow_html=True)
 
+        render_file_manager(active_collection)
+
         if search_mode == SEARCH_ALL_COLLECTIONS:
             stats = build_collection_summary()
             st.markdown(
@@ -1603,6 +2363,12 @@ def main():
                 documents.extend(extract_documents_from_pptx(pptx_files))
 
                 if documents:
+                    incoming_names = {doc.metadata.get("file_name") for doc in documents}
+                    existing_documents = [
+                        doc for doc in load_documents_json(active_collection)
+                        if doc.metadata.get("file_name") not in incoming_names
+                    ]
+                    documents = existing_documents + documents
                     status_area.info("Step 3/5: Saving chunks for keyword search...")
                     progress_bar.progress(58)
                     save_documents_json(active_collection, documents)
@@ -1657,7 +2423,9 @@ def main():
                             user_instruction=user_instruction,
                             search_mode=search_mode,
                             topic=user_topic,
-                            summary_length=summary_length
+                            summary_length=summary_length,
+                            filters=active_filters,
+                            use_reranker=st.session_state.use_reranker
                         )
                         if summary:
                             st.success("Summary generated")
@@ -1699,54 +2467,63 @@ def main():
                 elif not user_question.strip():
                     st.warning("Please enter a question.")
                 else:
-                    with st.spinner("Finding answer using selected search scope..."):
-                        answer, source_docs = answer_user_question(
+                    if streaming_enabled:
+                        source_docs, answer_stream = stream_answer_user_question(
                             collection_name=active_collection,
                             user_question=user_question,
                             search_mode=search_mode,
-                            topic=user_topic_for_question
+                            topic=user_topic_for_question,
+                            filters=active_filters,
+                            use_reranker=st.session_state.use_reranker
                         )
-                        if answer:
-                            save_chat_message(
-                                active_collection,
-                                user_question,
-                                answer,
-                                source_docs,
-                                search_mode,
-                                source_query=f"{user_question} {user_topic_for_question}"
+                        answer = st.write_stream(answer_stream)
+                    else:
+                        with st.spinner("Finding answer using selected search scope..."):
+                            answer, source_docs = answer_user_question(
+                                collection_name=active_collection,
+                                user_question=user_question,
+                                search_mode=search_mode,
+                                topic=user_topic_for_question,
+                                filters=active_filters,
+                                use_reranker=st.session_state.use_reranker
                             )
+                    if answer:
+                        save_chat_message(
+                            active_collection,
+                            user_question,
+                            answer,
+                            source_docs,
+                            search_mode,
+                            source_query=f"{user_question} {user_topic_for_question}"
+                        )
 
-                            st.success("Answer saved to chat history")
+                        st.success("Answer saved to chat history")
 
-                            st.write(answer)
+                        st.write(answer)
 
-                            render_result_actions(
-                                result_key="answer",
-                                title="Document Answer",
-                                prompt_text=f"{user_question} {user_topic_for_question}",
-                                answer_text=answer,
-                                source_docs=source_docs
-                            )
+                        render_result_actions(
+                            result_key="answer",
+                            title="Document Answer",
+                            prompt_text=f"{user_question} {user_topic_for_question}",
+                            answer_text=answer,
+                            source_docs=source_docs
+                        )
 
-                            show_sources(
-                                source_docs,
-                                title="Answer Sources",
-                                query=f"{user_question} {user_topic_for_question}"
-                            )
-                            
-                            suggestion_model = ChatGoogleGenerativeAI(
-                                model="gemini-2.5-flash",
-                                temperature=0.4,
-                                google_api_key=api_key
-                            )
+                        show_sources(
+                            source_docs,
+                            title="Answer Sources",
+                            query=f"{user_question} {user_topic_for_question}"
+                        )
 
-                            suggested_questions = generate_suggested_questions(
-                                model=suggestion_model,
-                                answer=answer,
-                                source_docs=source_docs
-                            )
+                        suggestion_model = get_chat_model(temperature=0.4)
 
-                            render_suggested_questions(suggested_questions)
+                        suggested_questions = generate_suggested_questions(
+                            model=suggestion_model,
+                            answer=answer,
+                            source_docs=source_docs
+                        )
+
+                        render_suggested_questions(suggested_questions)
 
     st.divider()
     st.markdown(f"## 💬 Chat History: `{active_collection}`")
