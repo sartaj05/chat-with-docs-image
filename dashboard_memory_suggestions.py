@@ -77,7 +77,6 @@ def collect_dashboard_stats(collections_dir: str, documents_json: str = "documen
 
         has_index = (
             os.path.exists(os.path.join(collection_path, "index.faiss"))
-            and os.path.exists(os.path.join(collection_path, "index.pkl"))
         )
 
         if documents and has_index:

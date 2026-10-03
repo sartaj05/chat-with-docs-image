@@ -9,6 +9,8 @@ import difflib
 import hashlib
 import secrets
 import sqlite3
+import time
+from pathlib import PurePosixPath
 from datetime import datetime
 from typing import Any, List, Dict, Tuple
 from source_preview import render_source_preview
@@ -22,12 +24,14 @@ from docx import Document
 from pptx import Presentation
 from pdf2image import convert_from_bytes
 from fpdf import FPDF
+import faiss
 from rank_bm25 import BM25Okapi
 
 from google import genai
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
+from langchain_community.docstore.in_memory import InMemoryDocstore
 from langchain_core.documents import Document as LCDocument
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -87,6 +91,28 @@ DEFAULT_OLLAMA_CHAT_MODEL = "llama3.2"
 DEFAULT_OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 FILE_CATEGORIES = ["Uncategorized", "Work", "Finance", "Legal", "Research", "Personal", "Other"]
+
+
+def read_positive_int_env(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+MAX_UPLOAD_SIZE_BYTES = read_positive_int_env("MAX_UPLOAD_SIZE_MB", 50) * 1024 * 1024
+MAX_IMPORT_ZIP_MEMBERS = read_positive_int_env("MAX_IMPORT_ZIP_MEMBERS", 100)
+MAX_IMPORT_ZIP_UNCOMPRESSED_BYTES = (
+    read_positive_int_env("MAX_IMPORT_ZIP_UNCOMPRESSED_MB", 250) * 1024 * 1024
+)
+MAX_PDF_PAGES = read_positive_int_env("MAX_PDF_PAGES", 200)
+PROCESSING_TIMEOUT_SECONDS = read_positive_int_env("PROCESSING_TIMEOUT_SECONDS", 180)
+SAFE_COLLECTION_FILES = {DOCUMENTS_JSON, FILE_METADATA_JSON, CHAT_HISTORY_JSON}
+IGNORED_COLLECTION_FILES = {"index.faiss", "index.pkl"}
+
+
+class ProcessingLimitExceeded(RuntimeError):
+    """Raised when an upload exceeds the configured processing time limit."""
 
 
 class GeminiEmbeddings(Embeddings):
@@ -698,13 +724,13 @@ def get_workspace_root() -> str:
 
 def get_collections_dir() -> str:
     if st.session_state.get("authenticated_user"):
-        return os.path.join(get_workspace_root(), COLLECTIONS_DIR)
+        return os.path.join(get_workspace_root(), "collections")
     return COLLECTIONS_DIR
 
 
 def get_backups_dir() -> str:
     if st.session_state.get("authenticated_user"):
-        return os.path.join(get_workspace_root(), BACKUPS_DIR)
+        return os.path.join(get_workspace_root(), "backups")
     return BACKUPS_DIR
 
 
@@ -772,7 +798,7 @@ def get_collection_index_path(collection_name: str):
 
 def collection_has_index(collection_name: str):
     path = get_collection_index_path(collection_name)
-    return os.path.exists(os.path.join(path, "index.faiss")) and os.path.exists(os.path.join(path, "index.pkl"))
+    return os.path.exists(os.path.join(path, "index.faiss"))
 
 
 def collection_has_documents_json(collection_name: str):
@@ -836,21 +862,69 @@ def import_collection_zip(uploaded_zip_file, collection_name: str):
         return False, "Please enter a valid collection name."
     if not uploaded_zip_file.name.lower().endswith(".zip"):
         return False, "Please upload a ZIP file."
+    uploaded_size = int(getattr(uploaded_zip_file, "size", 0) or 0)
+    if uploaded_size > MAX_UPLOAD_SIZE_BYTES:
+        return False, f"ZIP file is too large. Maximum size is {MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)} MB."
     target_path = get_collection_path(collection_name)
     temp_path = f"{target_path}.importing_{secrets.token_hex(4)}"
     try:
         with zipfile.ZipFile(uploaded_zip_file, "r") as zip_ref:
             temp_abs = os.path.abspath(temp_path)
-            for member in zip_ref.infolist():
-                member_abs = os.path.abspath(os.path.join(temp_path, member.filename))
+            members = zip_ref.infolist()
+            if len(members) > MAX_IMPORT_ZIP_MEMBERS:
+                return False, f"Import blocked: ZIP contains more than {MAX_IMPORT_ZIP_MEMBERS} files."
+
+            total_uncompressed = 0
+            safe_members = []
+            for member in members:
+                normalized_name = member.filename.replace("\\", "/")
+                member_path = PurePosixPath(normalized_name)
+                member_abs = os.path.abspath(os.path.join(temp_path, normalized_name))
                 if os.path.commonpath([temp_abs, member_abs]) != temp_abs:
                     return False, "Import blocked: ZIP contains an unsafe path."
+
+                if member.is_dir():
+                    continue
+                if (
+                    member_path.is_absolute()
+                    or ".." in member_path.parts
+                    or len(member_path.parts) != 1
+                ):
+                    return False, "Import blocked: ZIP must contain only safe collection files."
+                if normalized_name not in SAFE_COLLECTION_FILES | IGNORED_COLLECTION_FILES:
+                    return False, f"Import blocked: unsupported file in ZIP: {normalized_name}"
+                if member.flag_bits & 0x1:
+                    return False, "Import blocked: encrypted ZIP files are not supported."
+
+                total_uncompressed += member.file_size
+                if total_uncompressed > MAX_IMPORT_ZIP_UNCOMPRESSED_BYTES:
+                    return False, "Import blocked: ZIP expands beyond the configured size limit."
+                if normalized_name in SAFE_COLLECTION_FILES:
+                    safe_members.append((member, normalized_name))
+
+            if DOCUMENTS_JSON not in {name for _, name in safe_members}:
+                return False, f"Import blocked: ZIP must contain {DOCUMENTS_JSON}."
+
             os.makedirs(temp_path, exist_ok=True)
-            zip_ref.extractall(temp_path)
+            for member, normalized_name in safe_members:
+                destination_path = os.path.join(temp_path, normalized_name)
+                with zip_ref.open(member, "r") as source, open(destination_path, "wb") as destination:
+                    shutil.copyfileobj(source, destination, length=1024 * 1024)
+
+        with open(os.path.join(temp_path, DOCUMENTS_JSON), "r", encoding="utf-8") as file:
+            raw_documents = json.load(file)
+        if not isinstance(raw_documents, list) or not all(isinstance(item, dict) for item in raw_documents):
+            return False, f"Import blocked: {DOCUMENTS_JSON} is invalid."
+        documents = deserialize_documents(raw_documents)
+        if documents:
+            build_faiss_index_at_path(temp_path, documents)
+
         if os.path.exists(target_path):
             shutil.rmtree(target_path)
         os.replace(temp_path, target_path)
-        return True, f"Collection imported as: {collection_name}"
+        if documents:
+            return True, f"Collection imported and reindexed as: {collection_name}"
+        return True, f"Empty collection imported as: {collection_name}"
     except Exception as e:
         if os.path.exists(temp_path):
             shutil.rmtree(temp_path)
@@ -1204,6 +1278,27 @@ def split_text_with_metadata(text: str, base_metadata: Dict) -> List[LCDocument]
     return documents
 
 
+def validate_uploaded_files(uploaded_files) -> List[str]:
+    errors = []
+    max_size_mb = MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)
+    for uploaded_file in uploaded_files or []:
+        file_size = int(getattr(uploaded_file, "size", 0) or 0)
+        if file_size > MAX_UPLOAD_SIZE_BYTES:
+            errors.append(f"{uploaded_file.name}: maximum file size is {max_size_mb} MB.")
+    return errors
+
+
+def start_processing_deadline() -> float:
+    return time.monotonic() + PROCESSING_TIMEOUT_SECONDS
+
+
+def check_processing_deadline(deadline: float):
+    if deadline is not None and time.monotonic() > deadline:
+        raise ProcessingLimitExceeded(
+            f"Document processing exceeded the {PROCESSING_TIMEOUT_SECONDS}-second limit."
+        )
+
+
 def layout_aware_ocr_details(image) -> Tuple[str, float, List[List[str]]]:
     """Return ordered OCR text, mean confidence, and heuristic table rows."""
     try:
@@ -1266,20 +1361,25 @@ def extract_ocr_text(image) -> Tuple[str, bool, float, List[List[str]]]:
     return pytesseract.image_to_string(image), False, 0.0, []
 
 
-def extract_documents_from_pdfs(pdf_docs) -> List[LCDocument]:
+def extract_documents_from_pdfs(pdf_docs, deadline: float = None) -> List[LCDocument]:
     documents = []
     for pdf in pdf_docs:
         try:
+            check_processing_deadline(deadline)
             pdf.seek(0)
             reader = PdfReader(pdf)
+            if len(reader.pages) > MAX_PDF_PAGES:
+                raise ValueError(f"PDF exceeds the {MAX_PDF_PAGES}-page limit.")
             pages_needing_ocr = []
             for page_index, page in enumerate(reader.pages, start=1):
+                check_processing_deadline(deadline)
                 page_text = page.extract_text() or ""
                 if page_text.strip():
                     documents.extend(split_text_with_metadata(page_text, {"file_name": pdf.name, "file_type": "PDF", "page": page_index}))
                 else:
                     pages_needing_ocr.append(page_index)
             if pages_needing_ocr:
+                check_processing_deadline(deadline)
                 pdf.seek(0)
                 images = convert_from_bytes(pdf.read())
                 for page_index, image in enumerate(images, start=1):
@@ -1300,10 +1400,11 @@ def extract_documents_from_pdfs(pdf_docs) -> List[LCDocument]:
     return documents
 
 
-def extract_documents_from_images(image_docs) -> List[LCDocument]:
+def extract_documents_from_images(image_docs, deadline: float = None) -> List[LCDocument]:
     documents = []
     for image_file in image_docs:
         try:
+            check_processing_deadline(deadline)
             image = Image.open(image_file)
             image_text, used_layout_ocr, ocr_confidence, ocr_table_rows = extract_ocr_text(image)
             if image_text.strip():
@@ -1319,10 +1420,11 @@ def extract_documents_from_images(image_docs) -> List[LCDocument]:
     return documents
 
 
-def extract_documents_from_docx(docx_docs) -> List[LCDocument]:
+def extract_documents_from_docx(docx_docs, deadline: float = None) -> List[LCDocument]:
     documents = []
     for docx_file in docx_docs:
         try:
+            check_processing_deadline(deadline)
             document = Document(docx_file)
             docx_text = ""
             for para in document.paragraphs:
@@ -1339,10 +1441,11 @@ def extract_documents_from_docx(docx_docs) -> List[LCDocument]:
     return documents
 
 
-def extract_documents_from_txt(txt_docs) -> List[LCDocument]:
+def extract_documents_from_txt(txt_docs, deadline: float = None) -> List[LCDocument]:
     documents = []
     for txt_file in txt_docs:
         try:
+            check_processing_deadline(deadline)
             txt_file.seek(0)
             raw_data = txt_file.read()
             try:
@@ -1356,10 +1459,11 @@ def extract_documents_from_txt(txt_docs) -> List[LCDocument]:
     return documents
 
 
-def extract_documents_from_csv(csv_docs) -> List[LCDocument]:
+def extract_documents_from_csv(csv_docs, deadline: float = None) -> List[LCDocument]:
     documents = []
     for csv_file in csv_docs:
         try:
+            check_processing_deadline(deadline)
             csv_file.seek(0)
             dataframe = pd.read_csv(csv_file)
             csv_text = dataframe.to_csv(index=False)
@@ -1370,10 +1474,11 @@ def extract_documents_from_csv(csv_docs) -> List[LCDocument]:
     return documents
 
 
-def extract_documents_from_xlsx(xlsx_docs) -> List[LCDocument]:
+def extract_documents_from_xlsx(xlsx_docs, deadline: float = None) -> List[LCDocument]:
     documents = []
     for xlsx_file in xlsx_docs:
         try:
+            check_processing_deadline(deadline)
             xlsx_file.seek(0)
             sheets = pd.read_excel(xlsx_file, sheet_name=None)
             workbook_text = ""
@@ -1387,10 +1492,11 @@ def extract_documents_from_xlsx(xlsx_docs) -> List[LCDocument]:
     return documents
 
 
-def extract_documents_from_pptx(pptx_docs) -> List[LCDocument]:
+def extract_documents_from_pptx(pptx_docs, deadline: float = None) -> List[LCDocument]:
     documents = []
     for pptx_file in pptx_docs:
         try:
+            check_processing_deadline(deadline)
             pptx_file.seek(0)
             presentation = Presentation(pptx_file)
             pptx_text = ""
@@ -1414,11 +1520,9 @@ def extract_documents_from_pptx(pptx_docs) -> List[LCDocument]:
 
 def create_faiss_vector_store(collection_name: str, documents: List[LCDocument]):
     try:
-        embeddings = get_embeddings()
-        vector_store = FAISS.from_documents(documents, embedding=embeddings)
         collection_path = get_collection_index_path(collection_name)
         os.makedirs(collection_path, exist_ok=True)
-        vector_store.save_local(collection_path)
+        vector_store = build_faiss_index_at_path(collection_path, documents)
         save_documents_json(collection_name, documents)
         return vector_store
     except Exception as e:
@@ -1426,11 +1530,40 @@ def create_faiss_vector_store(collection_name: str, documents: List[LCDocument])
         return None
 
 
+def build_faiss_index_at_path(index_path: str, documents: List[LCDocument]):
+    """Build a FAISS index and persist only the native index binary.
+
+    LangChain's default save_local also writes a pickle containing the docstore.
+    The app already persists documents as JSON, so the pickle is unnecessary.
+    """
+    embeddings = get_embeddings()
+    vector_store = FAISS.from_documents(documents, embedding=embeddings)
+    os.makedirs(index_path, exist_ok=True)
+    faiss.write_index(vector_store.index, os.path.join(index_path, "index.faiss"))
+    return vector_store
+
+
 def load_faiss_vector_store(collection_name: str):
     try:
         embeddings = get_embeddings()
         collection_path = get_collection_index_path(collection_name)
-        return FAISS.load_local(collection_path, embeddings, allow_dangerous_deserialization=True)
+        index_path = os.path.join(collection_path, "index.faiss")
+        documents = load_documents_json(collection_name)
+        if not os.path.exists(index_path) or not documents:
+            return None
+
+        index = faiss.read_index(index_path)
+        if index.ntotal != len(documents):
+            raise ValueError("FAISS index does not match the persisted document list.")
+
+        document_ids = [str(index) for index in range(len(documents))]
+        docstore = InMemoryDocstore(dict(zip(document_ids, documents)))
+        return FAISS(
+            embedding_function=embeddings,
+            index=index,
+            docstore=docstore,
+            index_to_docstore_id={index: document_id for index, document_id in enumerate(document_ids)}
+        )
     except Exception as e:
         st.error(f"Error loading FAISS vector store: {e}")
         return None
@@ -1888,22 +2021,22 @@ Answer:
     return docs, token_stream()
 
 
-def extract_text_for_comparison(uploaded_file) -> str:
+def extract_text_for_comparison(uploaded_file, deadline: float = None) -> str:
     name = uploaded_file.name.lower()
     if name.endswith(".pdf"):
-        docs = extract_documents_from_pdfs([uploaded_file])
+        docs = extract_documents_from_pdfs([uploaded_file], deadline=deadline)
     elif name.endswith(('.jpg', '.jpeg', '.png')):
-        docs = extract_documents_from_images([uploaded_file])
+        docs = extract_documents_from_images([uploaded_file], deadline=deadline)
     elif name.endswith(".docx"):
-        docs = extract_documents_from_docx([uploaded_file])
+        docs = extract_documents_from_docx([uploaded_file], deadline=deadline)
     elif name.endswith(".txt"):
-        docs = extract_documents_from_txt([uploaded_file])
+        docs = extract_documents_from_txt([uploaded_file], deadline=deadline)
     elif name.endswith(".csv"):
-        docs = extract_documents_from_csv([uploaded_file])
+        docs = extract_documents_from_csv([uploaded_file], deadline=deadline)
     elif name.endswith(".xlsx"):
-        docs = extract_documents_from_xlsx([uploaded_file])
+        docs = extract_documents_from_xlsx([uploaded_file], deadline=deadline)
     elif name.endswith(".pptx"):
-        docs = extract_documents_from_pptx([uploaded_file])
+        docs = extract_documents_from_pptx([uploaded_file], deadline=deadline)
     else:
         return ""
     return "\n\n".join(doc.page_content for doc in docs)
@@ -2344,10 +2477,14 @@ def render_document_comparison():
         if st.button("Compare documents", key="compare_documents_button", use_container_width=True):
             if not old_file or not new_file:
                 st.warning("Upload both the original and updated document.")
+            elif (upload_errors := validate_uploaded_files([old_file, new_file])):
+                for error in upload_errors:
+                    st.error(error)
             else:
                 with st.spinner("Extracting and comparing documents..."):
-                    old_text = extract_text_for_comparison(old_file)
-                    new_text = extract_text_for_comparison(new_file)
+                    comparison_deadline = start_processing_deadline()
+                    old_text = extract_text_for_comparison(old_file, deadline=comparison_deadline)
+                    new_text = extract_text_for_comparison(new_file, deadline=comparison_deadline)
                     if not old_text or not new_text:
                         st.error("Could not extract text from one of the documents.")
                     else:
@@ -2665,8 +2802,15 @@ def main():
                 st.warning("Please select at least one file.")
                 return
 
+            upload_errors = validate_uploaded_files(selected_uploaded_files)
+            if upload_errors:
+                for error in upload_errors:
+                    st.error(error)
+                return
+
             progress_bar = st.progress(0)
             status_area = st.empty()
+            processing_deadline = start_processing_deadline()
 
             with st.spinner(f"Processing files into collection: {active_collection}"):
                 status_area.info("Step 1/5: Sorting uploaded files...")
@@ -2684,13 +2828,13 @@ def main():
                 progress_bar.progress(35)
 
                 documents = []
-                documents.extend(extract_documents_from_pdfs(pdf_files))
-                documents.extend(extract_documents_from_images(image_files))
-                documents.extend(extract_documents_from_docx(docx_files))
-                documents.extend(extract_documents_from_txt(txt_files))
-                documents.extend(extract_documents_from_csv(csv_files))
-                documents.extend(extract_documents_from_xlsx(xlsx_files))
-                documents.extend(extract_documents_from_pptx(pptx_files))
+                documents.extend(extract_documents_from_pdfs(pdf_files, deadline=processing_deadline))
+                documents.extend(extract_documents_from_images(image_files, deadline=processing_deadline))
+                documents.extend(extract_documents_from_docx(docx_files, deadline=processing_deadline))
+                documents.extend(extract_documents_from_txt(txt_files, deadline=processing_deadline))
+                documents.extend(extract_documents_from_csv(csv_files, deadline=processing_deadline))
+                documents.extend(extract_documents_from_xlsx(xlsx_files, deadline=processing_deadline))
+                documents.extend(extract_documents_from_pptx(pptx_files, deadline=processing_deadline))
 
                 if documents:
                     incoming_names = {doc.metadata.get("file_name") for doc in documents}
@@ -2705,6 +2849,11 @@ def main():
 
                     status_area.info("Step 4/5: Creating vector index...")
                     progress_bar.progress(80)
+                    try:
+                        check_processing_deadline(processing_deadline)
+                    except ProcessingLimitExceeded as error:
+                        status_area.error(str(error))
+                        return
 
                     vector_store = create_faiss_vector_store(active_collection, documents)
 
